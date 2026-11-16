@@ -5,6 +5,7 @@ on:
       - main
     paths:
       - "modal_mcp.py"
+      - "sandbox_lifecycle.py"
       - "path_reader.py"
       - "sandbox_images.py"
       - "oauth_support.py"
@@ -36,7 +37,7 @@ jobs:
           python-version: '3.12'
       - name: Syntax verification and unit tests
         run: |
-          python -m compileall -q modal_mcp.py path_reader.py smoke_read_path.py transfer_http.py smoke_transfer_100mb.py oauth_support.py passphrase_oauth.py sandbox_images.py smoke_sandbox_images.py smoke_mcp.py smoke_sandbox.py smoke_oauth.py smoke_live_oauth.py tests
+          python -m compileall -q modal_mcp.py sandbox_lifecycle.py path_reader.py smoke_read_path.py transfer_http.py smoke_transfer_100mb.py oauth_support.py passphrase_oauth.py sandbox_images.py smoke_sandbox_images.py smoke_mcp.py smoke_sandbox.py smoke_oauth.py smoke_live_oauth.py tests
           python -m unittest discover -s tests -v
       - name: Verify credentials exist
         run: |
