@@ -40,6 +40,8 @@ jobs:
         run: python -m pip install 'modal>=1.6,<2'
       - name: Deploy MCP control plane
         run: modal deploy modal_mcp.py
+      - name: Verify authenticated MCP tools/list
+        run: modal run smoke_mcp.py
       - name: Smoke test unauthenticated MCP request
         env:
           MCP_ENDPOINT: https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/mcp
