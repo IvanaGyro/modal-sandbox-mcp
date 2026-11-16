@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 
 import modal
+from typing import Literal
+from sandbox_images import resolve_sandbox_image
 from oauth_support import AUTH_VOLUME, github_oauth, require_authorized_owner
 from transfer_http import (
     TRANSFER_VOLUME, WORKSPACE_VOLUME, install_transfer_routes,
@@ -23,7 +25,7 @@ app = modal.App(APP_NAME)
 # arbitrary user commands in the control-plane container.
 web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastmcp>=3.4,<3.5", "pydantic>=2,<3"
-).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http")
+).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http").add_local_python_source("sandbox_images")
 sandbox_image = modal.Image.debian_slim(python_version="3.12").apt_install(
     "bash", "git", "curl", "ca-certificates", "build-essential"
 )
@@ -132,8 +134,22 @@ def mcp_web():
         cpu: float = 1.0,
         memory_mib: int = 1024,
         persistent_workspace: bool = False,
+        image_ref: str | None = None,
+        image_source: Literal["registry", "modal_name", "modal_id"] = "registry",
+        image_add_python: str | None = None,
     ) -> dict:
-        """Create an isolated Linux shell. Resource requests incur Modal charges."""
+        """Create a Linux Sandbox with a chosen Image.
+
+        Default: prebuilt Debian/Python plus common developer tools.
+        image_source="registry": pull a public OCI image (e.g.
+        "python:3.12-slim-bookworm" or "ubuntu:22.04"); use
+        image_add_python="3.12" if the image has no Python.
+        image_source="modal_name": an Image published in your Modal workspace.
+        image_source="modal_id": an existing Modal Image ID (im-...).
+        Custom images need a POSIX /bin/sh and 'sleep' for their keepalive;
+        read_file also requires 'python'. Image selection does NOT allocate GPU.
+        Resource requests and image builds incur Modal charges.
+        """
         require_authorized_owner()
         if not 60 <= lifetime_seconds <= 3600:
             raise ValueError("lifetime_seconds must be 60–3600")
@@ -143,9 +159,16 @@ def mcp_web():
             raise ValueError("cpu must be 0.125–2 cores")
         if not 128 <= memory_mib <= 4096:
             raise ValueError("memory_mib must be 128–4096")
+        selected_image, image_meta = resolve_sandbox_image(
+            modal, sandbox_image, image_ref, image_source, image_add_python
+        )
+        # Explicit keepalive for registry images: since Modal now respects
+        # OCI CMD, e.g. python:3.12's default CMD may exit immediately.
+        keepalive = ("sh", "-c", "while :; do sleep 3600; done") if image_ref else ()
         sb = modal.Sandbox.create(
+            *keepalive,
             app=app,
-            image=sandbox_image,
+            image=selected_image,
             timeout=lifetime_seconds,
             idle_timeout=idle_seconds,
             cpu=cpu,
@@ -161,6 +184,7 @@ def mcp_web():
                 "lifetime_seconds": lifetime_seconds,
                 "persistent_workspace": persistent_workspace,
                 "workspace_path": "/workspace" if persistent_workspace else None,
+                **image_meta,
             }
         finally:
             sb.detach()
@@ -175,7 +199,14 @@ def mcp_web():
             raise ValueError(f"timeout_seconds must be 1–{MAX_COMMAND_SECONDS}")
         sb = _get_sandbox(sandbox_id)
         try:
-            proc = sb.exec("bash", "-lc", command, timeout=timeout_seconds)
+            # Maintain Bash behavior where available; permit POSIX images
+            # that provide /bin/sh but do not include Bash (e.g. Alpine).
+            proc = sb.exec(
+                "sh", "-c",
+                'if command -v bash >/dev/null 2>&1; then exec bash -lc "$1"; '
+                'else exec sh -c "$1"; fi',
+                "mcp-shell", command, timeout=timeout_seconds,
+            )
             stdout = proc.stdout.read()
             stderr = proc.stderr.read()
             return {
