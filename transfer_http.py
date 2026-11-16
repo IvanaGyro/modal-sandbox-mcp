@@ -178,7 +178,8 @@ def create_download_link(
         size = stage.stat().st_size
         if not 1 <= size <= MAX_TRANSFER_BYTES:
             raise ValueError("Export must be nonempty and at most 256 MiB")
-        digest = hashlib.file_digest(open(stage, "rb"), "sha256").hexdigest()
+        with open(stage, "rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
         TRANSFER_VOLUME.commit()
         basename = PurePosixPath(path).name or "download.bin"
         token = make_token({
@@ -244,19 +245,16 @@ def install_transfer_routes(mcp) -> None:
 
             checksum = hashlib.sha256()
             total = 0
-            with tempfile.NamedTemporaryFile(prefix="modal-mcp-upload-", delete=False) as tmp:
-                local = tmp.name
-                try:
+            local = None
+            try:
+                with tempfile.NamedTemporaryFile(prefix="modal-mcp-upload-", delete=False) as tmp:
+                    local = tmp.name
                     async for chunk in request.stream():
                         total += len(chunk)
                         if total > size:
                             raise HTTPException(status_code=413, detail="Upload too large")
                         checksum.update(chunk)
                         tmp.write(chunk)
-                finally:
-                    tmp.flush()
-
-            try:
                 if total != size or not hmac.compare_digest(checksum.hexdigest(), expected_hash):
                     return JSONResponse(
                         {"error": "size or SHA-256 mismatch"}, status_code=422
@@ -278,7 +276,8 @@ def install_transfer_routes(mcp) -> None:
                     headers={"Cache-Control": "no-store"}
                 )
             finally:
-                Path(local).unlink(missing_ok=True)
+                if local:
+                    Path(local).unlink(missing_ok=True)
 
     @mcp.custom_route("/transfer/download/{token}", methods=["GET"])
     async def download(request: Request):
