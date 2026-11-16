@@ -5,6 +5,8 @@ on:
       - main
     paths:
       - "modal_mcp.py"
+      - "oauth_support.py"
+      - "smoke_mcp.py"
       - ".github/workflows/deploy.yml"
       - "tests/**"
   workflow_dispatch:
@@ -30,7 +32,7 @@ jobs:
           python-version: '3.12'
       - name: Syntax verification and unit tests
         run: |
-          python -m compileall -q modal_mcp.py tests
+          python -m compileall -q modal_mcp.py oauth_support.py smoke_mcp.py smoke_sandbox.py smoke_oauth.py tests
           python -m unittest discover -s tests -v
       - name: Verify credentials exist
         run: |
