@@ -99,7 +99,7 @@ dedicated encryption key, rate limits and additional auditing.
 |---|---|
 | `create_sandbox` | CPU-only Linux Sandbox, selectable Image, optionally shared persistent `/workspace` |
 | `exec_command` | Shell command, up to 45 seconds per call |
-| `read_file` | UTF-8 byte-range reader, **8 KiB default / 16 KiB maximum** per result |
+| `read_path` | Automatically inline small UTF-8 files, link larger/binary files, or ZIP directories |
 | `write_file` | UTF-8 text file write, up to 100,000 bytes |
 | `list_directory` | Paginated directory entries (up to 200 per call) |
 | `stat_path` | File/directory type and size |
@@ -107,17 +107,24 @@ dedicated encryption key, rate limits and additional auditing.
 | `remove_path` | Delete file/directory (recursive deletion opt-in) |
 | `commit_workspace` | Commit changes to the shared persistent `/workspace` Volume |
 | `create_upload_link` | Short-lived signed HTTPS PUT for binary files up to **256 MiB** |
-| `create_download_link` | Snapshot Sandbox file to a persistent staging Volume; signed HTTPS GET |
-| `create_directory_download_link` | Package a directory into ZIP, return signed HTTPS GET |
 | `revoke_download_link` | Immediately delete staged export and invalidate its URL |
 | `sandbox_status` | Check running state |
 | `terminate_sandbox` | Stop sandbox computation |
 
-**MCP never returns large file contents:** only short metadata/URLs. For plain
-text, `read_file(sandbox_id, path, offset=0, max_bytes=8192)` returns
-`content`, `size_bytes`, `offset`, `next_offset` and `eof`. Use its
-returned `next_offset` to avoid splitting UTF-8 sequences. For a binary file
-or larger payload, prefer a signed link instead of Base64 in MCP.
+**One read operation; no offset or paging for file contents:**
+`read_path(sandbox_id, path, expires_in_seconds=600)` inspects the path and
+chooses a response automatically:
+
+| Path | `delivery` | Tool result |
+|---|---|---|
+| UTF-8 text file ≤ 8,192 bytes | `inline` | `kind: file`, `encoding: utf-8`, `content`, `size_bytes` |
+| Larger text file or binary file | `download` | `kind: file`, signed `download_url`, `size_bytes`, `sha256` |
+| Directory (including empty) | `download` | `kind: directory`, `format: zip`, signed `download_url`, `size_bytes`, `sha256` |
+
+Text containing NUL/control bytes is treated as binary, even when UTF-8
+decoding succeeds. Large files never enter MCP JSON-RPC responses. The
+`read_path` API does **not** accept `offset` or `max_bytes`; it always
+returns the entire small text file or a link to the exported complete file.
 
 ### Selecting a Sandbox Image
 
@@ -147,9 +154,9 @@ Examples (MCP tool arguments):
 ```
 
 Custom images are expected to provide `sh` and `sleep` for the Sandbox
-keepalive, and Python on PATH for the chunked `read_file` tool. If absent,
-the optional `image_add_python` can install Python for public registry
-images. `exec_command` selects Bash if installed, otherwise POSIX `sh`.
+keepalive. Small text-file reads use the Modal Filesystem API directly,
+without needing Python inside the Sandbox. ZIP directory export **does**
+require Python on PATH; use `image_add_python` for registry images without it. `exec_command` selects Bash if installed, otherwise POSIX `sh`.
 The SDK supports `linux/amd64` registry images; named Images and Image IDs
 must be available to your Modal workspace. This MCP currently supports
 public registry references only, not private registry credentials.
@@ -180,8 +187,8 @@ sent through an MCP tool result.
 
 ### Binary download and directory archives
 
-1. Call `create_download_link(sandbox_id, "/tmp/data.bin")`, or
-   `create_directory_download_link(sandbox_id, "/workspace/project")` for ZIP.
+1. Call `read_path(sandbox_id, "/tmp/data.bin")` for a binary/large file, or
+   `read_path(sandbox_id, "/workspace/project")` for automatic ZIP.
 2. Fetch `download_url` via ordinary HTTPS:
 
 ```bash
@@ -232,7 +239,8 @@ Useful tests:
 - `smoke_sandbox.py` — original six tool calls using the legacy bearer.
 - `smoke_sandbox_images.py` — real public registry Image selection and Python bootstrap.
 - `smoke_transfer_100mb.py` — 100 MiB HTTP PUT/GET SHA-256 roundtrip,
-  ZIP directory export, paginated text read and cross-Sandbox Volume persistence.
+  ZIP directory export, automatic small-text read and cross-Sandbox Volume persistence.
+- `smoke_read_path.py` — live inline/large/binary/ZIP routing and deprecated-tool absence.
 
 Use GitHub Actions `workflow_dispatch` for the expensive integration tests.
 The full OAuth suite is manual to avoid repeated Modal App-create rate limits.
