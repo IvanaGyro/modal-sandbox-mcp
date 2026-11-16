@@ -90,11 +90,11 @@ def run_e2e() -> dict:
             })
             assert wrote["bytes_written"] == len("modal-mcp-file-roundtrip")
             print("write_file: OK")
-            read = invoke("read_file", {
+            read = invoke("read_path", {
                 "sandbox_id": sandbox_id, "path": "/tmp/mcp-e2e/note.txt",
             })
             assert read["content"] == "modal-mcp-file-roundtrip", read
-            print("read_file: OK (contents match)")
+            print("read_path: OK (contents match)")
             status = invoke("sandbox_status", {"sandbox_id": sandbox_id})
             assert status["running"] is True, status
             print("sandbox_status: OK (running)")
