@@ -14,7 +14,7 @@ ENDPOINT = "https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/mcp"
 EXPECTED_TOOLS = {
     "create_sandbox",
     "exec_command",
-    "read_file",
+    "read_path",
     "write_file",
     "sandbox_status",
     "terminate_sandbox",
