@@ -97,7 +97,7 @@ dedicated encryption key, rate limits and additional auditing.
 
 | Tool | Function |
 |---|---|
-| `create_sandbox` | CPU-only Linux Sandbox, optionally mount shared persistent `/workspace` |
+| `create_sandbox` | CPU-only Linux Sandbox, selectable Image, optionally shared persistent `/workspace` |
 | `exec_command` | Shell command, up to 45 seconds per call |
 | `read_file` | UTF-8 byte-range reader, **8 KiB default / 16 KiB maximum** per result |
 | `write_file` | UTF-8 text file write, up to 100,000 bytes |
@@ -118,6 +118,46 @@ text, `read_file(sandbox_id, path, offset=0, max_bytes=8192)` returns
 `content`, `size_bytes`, `offset`, `next_offset` and `eof`. Use its
 returned `next_offset` to avoid splitting UTF-8 sequences. For a binary file
 or larger payload, prefer a signed link instead of Base64 in MCP.
+
+### Selecting a Sandbox Image
+
+`create_sandbox` now supports an optional Image selector. Omitting
+`image_ref` preserves the previous Debian Slim image with Python 3.12,
+Bash, Git, curl and build tools.
+
+| `image_source` | `image_ref` example | Implementation |
+|---|---|---|
+| `registry` (default) | `python:3.12-slim-bookworm` | `modal.Image.from_registry(...)` |
+| `registry` with `image_add_python="3.12"` | `ubuntu:22.04` | Inject a Python runtime if the base image lacks one |
+| `modal_name` | `my-build-env:v1` | `modal.Image.from_name(...)` |
+| `modal_id` | `im-...` | `modal.Image.from_id(...)` |
+
+Examples (MCP tool arguments):
+
+```json
+{"image_ref": "python:3.12-slim-bookworm", "image_source": "registry"}
+```
+
+```json
+{"image_ref": "ubuntu:22.04", "image_add_python": "3.12"}
+```
+
+```json
+{"image_ref": "cytnx-cuda-build:v1", "image_source": "modal_name"}
+```
+
+Custom images are expected to provide `sh` and `sleep` for the Sandbox
+keepalive, and Python on PATH for the chunked `read_file` tool. If absent,
+the optional `image_add_python` can install Python for public registry
+images. `exec_command` selects Bash if installed, otherwise POSIX `sh`.
+The SDK supports `linux/amd64` registry images; named Images and Image IDs
+must be available to your Modal workspace. This MCP currently supports
+public registry references only, not private registry credentials.
+
+Using a CUDA/NVIDIA Image does **not** allocate a GPU. The current MCP
+`create_sandbox` does not expose `gpu`; Sandbox runs CPU-only. Image
+pulling and building can take additional time and consume resources.
+Do not include passwords or registry authentication in `image_ref`.
 
 ### Binary upload (e.g. a 100 MiB file)
 
@@ -190,6 +230,7 @@ Useful tests:
 - `smoke_live_oauth.py` — real endpoint, real OAuth, tools/list and Sandbox.
 - `smoke_mcp.py` — legacy bearer, tool discovery and anonymous denial.
 - `smoke_sandbox.py` — original six tool calls using the legacy bearer.
+- `smoke_sandbox_images.py` — real public registry Image selection and Python bootstrap.
 - `smoke_transfer_100mb.py` — 100 MiB HTTP PUT/GET SHA-256 roundtrip,
   ZIP directory export, paginated text read and cross-Sandbox Volume persistence.
 
@@ -203,4 +244,5 @@ The ordinary `Check` workflow performs lightweight syntax and unit checks.
 - [FastMCP: full OAuth server](https://gofastmcp.com/servers/auth/full-oauth-server)
 - [FastMCP: HTTP deployment](https://gofastmcp.com/deployment/http)
 - [Modal: Sandbox API](https://modal.com/docs/sdk/py/latest/Sandbox)
+- [Modal: Image API](https://modal.com/docs/sdk/py/latest/Image)
 - [Modal: volumes](https://modal.com/docs/guide/volumes)
