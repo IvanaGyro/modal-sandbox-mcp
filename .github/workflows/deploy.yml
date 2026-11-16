@@ -6,6 +6,7 @@ on:
     paths:
       - "modal_mcp.py"
       - "oauth_support.py"
+      - "passphrase_oauth.py"
       - "smoke_mcp.py"
       - ".github/workflows/deploy.yml"
       - "tests/**"
@@ -32,7 +33,7 @@ jobs:
           python-version: '3.12'
       - name: Syntax verification and unit tests
         run: |
-          python -m compileall -q modal_mcp.py oauth_support.py smoke_mcp.py smoke_sandbox.py smoke_oauth.py tests
+          python -m compileall -q modal_mcp.py oauth_support.py passphrase_oauth.py smoke_mcp.py smoke_sandbox.py smoke_oauth.py smoke_live_oauth.py tests
           python -m unittest discover -s tests -v
       - name: Verify credentials exist
         run: |
@@ -41,7 +42,18 @@ jobs:
       - name: Install Modal SDK
         run: python -m pip install 'modal>=1.6,<2'
       - name: Deploy MCP control plane
-        run: modal deploy modal_mcp.py
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if modal deploy modal_mcp.py; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo 'Modal deploy failed after three attempts' >&2
+              exit 1
+            fi
+            sleep $((attempt * 20))
+          done
       - name: Verify authenticated MCP tools/list
         run: modal run smoke_mcp.py
       - name: Smoke test unauthenticated MCP request
