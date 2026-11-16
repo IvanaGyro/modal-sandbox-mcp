@@ -30,7 +30,7 @@ MAX_FILE_CHARS = 100_000
 def _auth_from_environment():
     """Fail closed: never deploy a publicly accessible unauthenticated shell."""
     from fastmcp.server.auth import RemoteAuthProvider
-    from fastmcp.server.auth.providers.jwt import JWTVerifier, StaticTokenVerifier
+    from fastmcp.server.auth.providers.jwt import JWTVerifier
     from pydantic import AnyHttpUrl
 
     mode = os.getenv("MCP_AUTH_MODE", "").strip().lower()
@@ -58,12 +58,16 @@ def _auth_from_environment():
             base_url=os.environ["MCP_BASE_URL"],
         )
     if mode == "static-dev":
-        # For local integration with a bearer-capable MCP client only.
-        # StaticTokenVerifier is NOT a production OAuth implementation.
+        # Migration bootstrap: serve self-hosted OAuth with the previously
+        # configured high-entropy bearer as the consent passphrase, while
+        # still accepting that exact bearer for old test clients.
+        # Prefer a separate MCP_AUTH_PASSPHRASE and mode=passphrase later.
+        from passphrase_oauth import PassphraseOAuthProvider
+
         token = os.getenv("MCP_DEV_BEARER_TOKEN", "")
         if len(token) < 32:
             raise RuntimeError("MCP_DEV_BEARER_TOKEN must be at least 32 characters")
-        return StaticTokenVerifier(tokens={token: {"client_id": "private-dev-client", "scopes": ["sandbox"]}})
+        return PassphraseOAuthProvider(passphrase=token, legacy_bearer=token)
     raise RuntimeError("MCP_AUTH_MODE must be passphrase, github, oauth, or static-dev; unauthenticated mode is forbidden")
 
 
@@ -93,7 +97,7 @@ def mcp_web():
     auth_provider = _auth_from_environment()
     mcp = FastMCP("Modal Sandbox MCP", auth=auth_provider)
 
-    if os.getenv("MCP_AUTH_MODE", "").strip().lower() == "passphrase":
+    if os.getenv("MCP_AUTH_MODE", "").strip().lower() in ("passphrase", "static-dev"):
         from starlette.requests import Request
 
         @mcp.custom_route("/consent", methods=["GET", "POST"])
