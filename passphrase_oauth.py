@@ -323,8 +323,17 @@ class PassphraseOAuthProvider(InMemoryOAuthProvider):
             client = await self.get_client(pending["client_id"])
             if client is None:
                 return HTMLResponse("Client no longer valid", status_code=400)
-            # Generate a real, one-use S256 PKCE-bound auth code via the SDK.
-            redirect = await super().authorize(client, params)
+            # InMemoryOAuthProvider requires authorization clients to be
+            # registered. CIMD clients are validated by the CIMD manager, so
+            # only register them temporarily during the code-generation call.
+            cimd = _safe_chatgpt_cimd(pending["client_id"])
+            if cimd:
+                self.clients[client.client_id] = client
+            try:
+                redirect = await super().authorize(client, params)
+            finally:
+                if cimd:
+                    self.clients.pop(client.client_id, None)
             code = parse_qs(urlparse(redirect).query).get("code", [None])[0]
             if not code or code not in self.auth_codes:
                 raise RuntimeError("Failed to create authorization code")
