@@ -9,6 +9,12 @@ import os
 
 import modal
 from oauth_support import AUTH_VOLUME, github_oauth, require_authorized_owner
+from transfer_http import (
+    TRANSFER_VOLUME, WORKSPACE_VOLUME, install_transfer_routes,
+    make_upload_link, create_download_link as stage_download,
+    revoke_download_link as revoke_staged_download,
+    safe_path, _cleanup_exports,
+)
 
 APP_NAME = "modal-sandbox-mcp"
 app = modal.App(APP_NAME)
@@ -17,7 +23,7 @@ app = modal.App(APP_NAME)
 # arbitrary user commands in the control-plane container.
 web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastmcp>=3.4,<3.5", "pydantic>=2,<3"
-).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth")
+).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http")
 sandbox_image = modal.Image.debian_slim(python_version="3.12").apt_install(
     "bash", "git", "curl", "ca-certificates", "build-essential"
 )
@@ -86,7 +92,7 @@ def _get_sandbox(sandbox_id: str):
     secrets=[modal.Secret.from_name("modal-mcp-auth")],
     timeout=180,
     max_containers=1,
-    volumes={"/oauth-state": AUTH_VOLUME},
+    volumes={"/oauth-state": AUTH_VOLUME, "/transfer-staging": TRANSFER_VOLUME},
 )
 @modal.concurrent(max_inputs=8)
 @modal.asgi_app()
@@ -96,6 +102,7 @@ def mcp_web():
 
     auth_provider = _auth_from_environment()
     mcp = FastMCP("Modal Sandbox MCP", auth=auth_provider)
+    install_transfer_routes(mcp)
 
     if os.getenv("MCP_AUTH_MODE", "").strip().lower() in ("passphrase", "static-dev"):
         from starlette.requests import Request
@@ -111,6 +118,7 @@ def mcp_web():
         idle_seconds: int = 300,
         cpu: float = 1.0,
         memory_mib: int = 1024,
+        persistent_workspace: bool = False,
     ) -> dict:
         """Create an isolated Linux shell. Resource requests incur Modal charges."""
         require_authorized_owner()
@@ -129,10 +137,17 @@ def mcp_web():
             idle_timeout=idle_seconds,
             cpu=cpu,
             memory=memory_mib,
-            workdir="/tmp",
+            workdir="/workspace" if persistent_workspace else "/tmp",
+            volumes={"/workspace": WORKSPACE_VOLUME} if persistent_workspace else {},
         )
         try:
-            return {"sandbox_id": sb.object_id, "status": "created", "lifetime_seconds": lifetime_seconds}
+            return {
+                "sandbox_id": sb.object_id,
+                "status": "created",
+                "lifetime_seconds": lifetime_seconds,
+                "persistent_workspace": persistent_workspace,
+                "workspace_path": "/workspace" if persistent_workspace else None,
+            }
         finally:
             sb.detach()
 
@@ -158,19 +173,45 @@ def mcp_web():
             sb.detach()
 
     @mcp.tool
-    def read_file(sandbox_id: str, path: str) -> dict:
-        """Read a UTF-8 text file from a sandbox, up to 100 KiB."""
+    def read_file(
+        sandbox_id: str,
+        path: str,
+        offset: int = 0,
+        max_bytes: int = 8192,
+    ) -> dict:
+        """Read a bounded UTF-8 byte range; use next_offset to continue.
+
+        Defaults to 8 KiB rather than returning whole files into ChatGPT.
+        For binary files or large downloads use create_download_link.
+        """
         require_authorized_owner()
-        if not path.startswith("/") or len(path) > 1024:
-            raise ValueError("path must be absolute")
+        path = safe_path(path)
+        if offset < 0:
+            raise ValueError("offset must be nonnegative")
+        if not 256 <= max_bytes <= 16384:
+            raise ValueError("max_bytes must be 256–16384")
+        code = (
+            "import codecs,json,os,sys;"
+            "p=sys.argv[1];start=int(sys.argv[2]);n=int(sys.argv[3]);"
+            "f=open(p,'rb');f.seek(start);part=f.read(n);"
+            "dec=codecs.getincrementaldecoder('utf-8')(errors='strict');"
+            "text=dec.decode(part,final=False);"
+            "used=len(part)-len(dec.getstate()[0]);"
+            "size=os.fstat(f.fileno()).st_size;"
+            "print(json.dumps(dict(content=text,offset=start,next_offset=start+used,"
+            "size_bytes=size,eof=start+used>=size),ensure_ascii=False))"
+        )
         sb = _get_sandbox(sandbox_id)
         try:
-            # Modal's filesystem API avoids subprocess argv-size limits and
-            # shell quoting problems when transferring files.
-            data = sb.filesystem.read_bytes(path)
-            if len(data) > MAX_FILE_CHARS:
-                raise ValueError("File is too large")
-            return {"path": path, "content": data.decode("utf-8")}
+            process = sb.exec(
+                "python", "-c", code, path, str(offset), str(max_bytes), timeout=15
+            )
+            output = process.stdout.read()
+            error = process.stderr.read()
+            code = process.wait()
+            if code != 0:
+                raise RuntimeError("Cannot read UTF-8 chunk; verify offset and encoding: " + _clip(error, 600))
+            return {"path": path, **__import__("json").loads(output)}
         finally:
             sb.detach()
 
@@ -214,5 +255,129 @@ def mcp_web():
             return {"sandbox_id": sandbox_id, "terminated": True}
         finally:
             sb.detach()
+
+    @mcp.tool
+    def list_directory(
+        sandbox_id: str, path: str, offset: int = 0, limit: int = 100
+    ) -> dict:
+        """List a paginated Sandbox directory without oversized MCP responses."""
+        require_authorized_owner()
+        path = safe_path(path)
+        if offset < 0 or not 1 <= limit <= 200:
+            raise ValueError("offset must be nonnegative and limit 1–200")
+        sb = _get_sandbox(sandbox_id)
+        try:
+            entries = sorted(sb.filesystem.list_files(path), key=lambda x: x.name)
+            subset = entries[offset:offset+limit]
+            return {
+                "path": path,
+                "total": len(entries),
+                "next_offset": offset + limit if offset + limit < len(entries) else None,
+                "entries": [{
+                    "name": x.name, "type": str(x.type),
+                    "size_bytes": x.size
+                } for x in subset],
+            }
+        finally:
+            sb.detach()
+
+    @mcp.tool
+    def stat_path(sandbox_id: str, path: str) -> dict:
+        """Get file size and type without reading its contents."""
+        require_authorized_owner()
+        path = safe_path(path)
+        sb = _get_sandbox(sandbox_id)
+        try:
+            info = sb.filesystem.stat(path)
+            return {"path": path, "name": info.name,
+                    "type": str(info.type), "size_bytes": info.size}
+        finally:
+            sb.detach()
+
+    @mcp.tool
+    def make_directory(sandbox_id: str, path: str) -> dict:
+        """Create a directory and any missing parent directories."""
+        require_authorized_owner()
+        path = safe_path(path)
+        sb = _get_sandbox(sandbox_id)
+        try:
+            sb.filesystem.make_directory(path, create_parents=True)
+            return {"path": path, "created": True}
+        finally:
+            sb.detach()
+
+    @mcp.tool
+    def remove_path(sandbox_id: str, path: str, recursive: bool = False) -> dict:
+        """Delete a file or directory; recursive deletion is opt-in."""
+        require_authorized_owner()
+        path = safe_path(path)
+        if path in ("/", "/workspace", "/tmp", "/home", "/root", "/usr", "/etc", "/var"):
+            raise ValueError("Refusing to delete a protected root directory")
+        sb = _get_sandbox(sandbox_id)
+        try:
+            sb.filesystem.remove(path, recursive=recursive)
+            return {"path": path, "removed": True, "recursive": recursive}
+        finally:
+            sb.detach()
+
+    @mcp.tool
+    def commit_workspace(sandbox_id: str) -> dict:
+        """Persist files modified in the optional /workspace Modal Volume."""
+        require_authorized_owner()
+        sb = _get_sandbox(sandbox_id)
+        try:
+            probe = sb.exec("mountpoint", "-q", "/workspace", timeout=15)
+            if probe.wait() != 0:
+                raise ValueError("This Sandbox has no persistent /workspace Volume")
+            process = sb.exec("sync", "/workspace", timeout=60)
+            result = process.wait()
+            if result != 0:
+                raise RuntimeError("Volume sync failed: " + _clip(process.stderr.read(), 300))
+            return {"sandbox_id": sandbox_id, "volume": "modal-sandbox-mcp-workspace",
+                    "path": "/workspace", "committed": True}
+        finally:
+            sb.detach()
+
+    @mcp.tool
+    def create_upload_link(
+        sandbox_id: str, path: str, size_bytes: int, sha256: str,
+        expires_in_seconds: int = 600,
+    ) -> dict:
+        """Create a signed PUT URL for binary upload, up to 256 MiB.
+
+        The upload is streamed over HTTPS, checked against size/SHA-256 and
+        copied into the Sandbox without sending its bytes through MCP.
+        """
+        require_authorized_owner()
+        path = safe_path(path)
+        sb = _get_sandbox(sandbox_id)
+        try:
+            if sb.poll() is not None:
+                raise ValueError("Sandbox is no longer running")
+        finally:
+            sb.detach()
+        return make_upload_link(sandbox_id, path, size_bytes, sha256,
+                                expires_in_seconds)
+
+    @mcp.tool
+    def create_download_link(
+        sandbox_id: str, path: str, expires_in_seconds: int = 600,
+    ) -> dict:
+        """Stage a snapshot of a Sandbox file and return a short-lived HTTPS GET."""
+        require_authorized_owner()
+        return stage_download(sandbox_id, path, expires_in_seconds)
+
+    @mcp.tool
+    def revoke_download_link(download_url: str) -> dict:
+        """Immediately remove an exported file and invalidate its signed link."""
+        require_authorized_owner()
+        from urllib.parse import urlsplit
+        parsed = urlsplit(download_url)
+        prefix = "/transfer/download/"
+        if parsed.netloc != urlsplit("https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run").netloc:
+            raise ValueError("Not a Modal MCP download URL")
+        if not parsed.path.startswith(prefix):
+            raise ValueError("Not a download URL")
+        return revoke_staged_download(parsed.path[len(prefix):])
 
     return mcp.http_app(stateless_http=True)
