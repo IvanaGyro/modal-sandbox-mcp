@@ -97,15 +97,78 @@ dedicated encryption key, rate limits and additional auditing.
 
 | Tool | Function |
 |---|---|
-| `create_sandbox` | Start a bounded Modal Linux Sandbox |
-| `exec_command` | Run Shell commands, currently up to 45 seconds each |
-| `read_file` / `write_file` | Transfer small UTF-8 files |
-| `sandbox_status` | Check if the Sandbox is running |
-| `terminate_sandbox` | Stop the Sandbox and charges |
+| `create_sandbox` | CPU-only Linux Sandbox, optionally mount shared persistent `/workspace` |
+| `exec_command` | Shell command, up to 45 seconds per call |
+| `read_file` | UTF-8 byte-range reader, **8 KiB default / 16 KiB maximum** per result |
+| `write_file` | UTF-8 text file write, up to 100,000 bytes |
+| `list_directory` | Paginated directory entries (up to 200 per call) |
+| `stat_path` | File/directory type and size |
+| `make_directory` | Create nested directories |
+| `remove_path` | Delete file/directory (recursive deletion opt-in) |
+| `commit_workspace` | Commit changes to the shared persistent `/workspace` Volume |
+| `create_upload_link` | Short-lived signed HTTPS PUT for binary files up to **256 MiB** |
+| `create_download_link` | Snapshot Sandbox file to a persistent staging Volume; signed HTTPS GET |
+| `create_directory_download_link` | Package a directory into ZIP, return signed HTTPS GET |
+| `revoke_download_link` | Immediately delete staged export and invalidate its URL |
+| `sandbox_status` | Check running state |
+| `terminate_sandbox` | Stop sandbox computation |
+
+**MCP never returns large file contents:** only short metadata/URLs. For plain
+text, `read_file(sandbox_id, path, offset=0, max_bytes=8192)` returns
+`content`, `size_bytes`, `offset`, `next_offset` and `eof`. Use its
+returned `next_offset` to avoid splitting UTF-8 sequences. For a binary file
+or larger payload, prefer a signed link instead of Base64 in MCP.
+
+### Binary upload (e.g. a 100 MiB file)
+
+1. Use MCP `create_sandbox` and keep the returned `sandbox_id`.
+2. Compute the file's SHA-256 and number of **bytes** on your machine.
+3. Call `create_upload_link(sandbox_id, path="/tmp/data.bin", size_bytes=..., sha256="...")`.
+4. Upload the **raw file bytes** (not multipart form data) to `upload_url`:
+
+```bash
+# The URL is a short-lived bearer capability. Never log or share it.
+curl --fail-with-body --request PUT \
+  --header 'Content-Type: application/octet-stream' \
+  --upload-file data.bin "$UPLOAD_URL"
+```
+
+The endpoint streams the body, checks exact file length and SHA-256, then
+uses Modal's `Sandbox.filesystem.copy_from_local` to place the file into the
+Sandbox. A successfully used upload URL cannot be reused. No large data is
+sent through an MCP tool result.
+
+### Binary download and directory archives
+
+1. Call `create_download_link(sandbox_id, "/tmp/data.bin")`, or
+   `create_directory_download_link(sandbox_id, "/workspace/project")` for ZIP.
+2. Fetch `download_url` via ordinary HTTPS:
+
+```bash
+curl --fail --location "$DOWNLOAD_URL" --output data.bin
+sha256sum data.bin  # compare with SHA-256 from the MCP result
+```
+
+A download URL expires in **10 minutes by default** (configurable from 60 to
+3600 seconds). The server snapshots the file into the private
+`modal-sandbox-mcp-transfer-cache` Volume. Exports are limited to 256 MiB
+each, 20 retained files, and a 1 GiB staging quota. URLs can be revoked with
+`revoke_download_link`, and expired staged exports are cleaned hourly.
+Anyone with the URL can download until it expires; treat the URL like a secret.
+
+### Persistent workspace
+
+Specify `persistent_workspace=True` in `create_sandbox` to mount the shared
+named Volume `modal-sandbox-mcp-workspace` at `/workspace`. Call
+`commit_workspace(sandbox_id)` after changes to make them durable and visible
+to other Sandboxes. This workspace is **shared by all persistent Sandboxes**,
+not private to one session. Changes to identical filenames from concurrent
+Sandboxes can conflict. The workspace survives Sandbox termination; `/tmp`
+does not.
 
 Sandbox lifetime is at most one hour, 2 CPU cores and 4 GiB of RAM.
-The sample defaults are deliberately conservative. Sandboxes and Modal Volume
-storage may consume paid resources. **Terminate Sandboxes when finished.**
+The sample defaults are conservative. Sandboxes and Modal Volume storage may
+consume paid resources. **Terminate Sandboxes when finished.**
 
 ## Deployment and testing
 
@@ -126,7 +189,9 @@ Useful tests:
 - `smoke_passphrase_volume.py` — encrypted Modal Volume commit and recovery.
 - `smoke_live_oauth.py` — real endpoint, real OAuth, tools/list and Sandbox.
 - `smoke_mcp.py` — legacy bearer, tool discovery and anonymous denial.
-- `smoke_sandbox.py` — all six tool calls using the legacy bearer.
+- `smoke_sandbox.py` — original six tool calls using the legacy bearer.
+- `smoke_transfer_100mb.py` — 100 MiB HTTP PUT/GET SHA-256 roundtrip,
+  ZIP directory export, paginated text read and cross-Sandbox Volume persistence.
 
 Use GitHub Actions `workflow_dispatch` for the expensive integration tests.
 The full OAuth suite is manual to avoid repeated Modal App-create rate limits.
