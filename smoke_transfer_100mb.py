@@ -117,10 +117,11 @@ def main_test():
             assert info["size_bytes"] == SIZE, info
             print("Remote file stat matches 100 MiB", flush=True)
 
-            download = invoke("create_download_link", {
+            download = invoke("read_path", {
                 "sandbox_id": sandbox_id, "path": src,
                 "expires_in_seconds": 1800,
             })
+            assert download["kind"] == "file" and download["delivery"] == "download"
             assert download["size_bytes"] == SIZE
             assert download["sha256"] == expected
             print("Signed download link created (URL withheld)", flush=True)
@@ -153,21 +154,21 @@ def main_test():
                 "sandbox_id": sandbox_id, "path": text_path,
                 "content": "繁體中文🌈abcd",
             })
-            part = invoke("read_file", {
+            part = invoke("read_path", {
                 "sandbox_id": sandbox_id, "path": text_path,
-                "offset": 0, "max_bytes": 256,
             })
             assert part["content"] == "繁體中文🌈abcd", part
-            assert part["eof"] is True
+            assert part["delivery"] == "inline"
             folder = "/workspace/mcp-transfer-test-dir"
             invoke("make_directory", {"sandbox_id": sandbox_id, "path": folder})
             invoke("write_file", {"sandbox_id": sandbox_id, "path": folder + "/a.txt",
                                   "content": "archive test A"})
             invoke("write_file", {"sandbox_id": sandbox_id, "path": folder + "/b.txt",
                                   "content": "archive test B"})
-            zipped = invoke("create_directory_download_link", {
+            zipped = invoke("read_path", {
                 "sandbox_id": sandbox_id, "path": folder, "expires_in_seconds": 1800,
             })
+            assert zipped["kind"] == "directory" and zipped["delivery"] == "download"
             assert zipped["filename"].endswith(".zip"), zipped
             import zipfile
             from io import BytesIO
@@ -186,7 +187,7 @@ def main_test():
                 "sandbox_id": sandbox_id, "path": "/workspace"
             })
             assert any(e["name"] == "small-test.txt" for e in listed["entries"])
-            print("UTF-8 paged read, directory listing, persistent-volume commit: OK",
+            print("Automatic UTF-8 inline read, directory listing, persistent-volume commit: OK",
                   flush=True)
 
             # Verify that the committed state is visible in a different Sandbox.
@@ -198,9 +199,8 @@ def main_test():
                     "persistent_workspace": True,
                 })
                 secondary_id = secondary["sandbox_id"]
-                persisted = invoke("read_file", {
+                persisted = invoke("read_path", {
                     "sandbox_id": secondary_id, "path": text_path,
-                    "max_bytes": 256,
                 })
                 assert persisted["content"] == "繁體中文🌈abcd"
                 print("Persistent Volume recovered in a second Sandbox: OK", flush=True)
