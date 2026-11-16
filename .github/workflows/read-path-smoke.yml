@@ -1,0 +1,31 @@
+name: Unified read_path Integration Test
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/read-path-smoke.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modal-read-path-smoke
+  cancel-in-progress: false
+
+jobs:
+  read-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m compileall -q smoke_read_path.py
+      - run: python -m pip install 'modal>=1.6,<2'
+      - name: Verify live read_path inline and signed download routing
+        run: modal run smoke_read_path.py
