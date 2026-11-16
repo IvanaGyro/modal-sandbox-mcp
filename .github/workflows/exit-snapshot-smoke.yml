@@ -29,5 +29,5 @@ jobs:
         run: python -m compileall -q smoke_exit_snapshots.py
       - name: Install Modal
         run: python -m pip install 'modal>=1.6,<2'
-      - name: Test live budget, Exit Snapshot, resume, and explicit deletion
+      - name: Test live budget, Exit Snapshot retention, resume, and explicit deletion
         run: modal run smoke_exit_snapshots.py
