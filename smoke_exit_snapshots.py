@@ -1,7 +1,7 @@
 """Live Exit Snapshot, cost-based idle policy, resume and deletion smoke.
 
 Uses the deployed MCP with the existing Modal Secret; no tokens are logged.
-Creates two tiny CPU-only Sandboxes and terminates all Sandboxes in finally.
+Creates two tiny CPU-only Sandboxes, verifies retention and explicitly deletes their snapshots.
 """
 from __future__ import annotations
 
@@ -107,11 +107,30 @@ def verify():
 
             stopped = call("terminate_sandbox", {"sandbox_id": resumed_id})
             assert stopped["terminated"] is True
-            assert stopped["exit_snapshot"]["deleted"] is True, stopped
-            print("Active MCP termination deleted its Exit Snapshot", flush=True)
+            assert stopped["snapshot_deleted"] is False, stopped
+            assert stopped["exit_snapshot"]["status"] == "ready", stopped
+            listed = call("list_snapshots", {})
+            assert any(row["sandbox_id"] == resumed_id and row["status"] == "ready"
+                       for row in listed["snapshots"]), listed
+            print("MCP termination retained a listed Exit Snapshot", flush=True)
 
-            # Second explicit termination, without prior resume, must also
-            # delete the snapshot rather than retaining it for 30 days.
+            # Explicit deletion is a separate operation, and is idempotent.
+            deleted = call("delete_snapshot", {"sandbox_id": resumed_id})
+            assert deleted["deleted"] is True and deleted["status"] == "deleted", deleted
+            # Regression: the old code resurrected the inventory entry when
+            # terminate_sandbox was invoked again after explicit deletion.
+            stopped_again = call("terminate_sandbox", {"sandbox_id": resumed_id})
+            assert stopped_again["terminated"] is True, stopped_again
+            assert stopped_again["snapshot_deleted"] is True, stopped_again
+            assert stopped_again["exit_snapshot"]["status"] == "deleted", stopped_again
+            after_delete = call("list_snapshots", {})
+            assert all(item["sandbox_id"] != resumed_id
+                       for item in after_delete["snapshots"]), after_delete
+            again = call("delete_snapshot", {"sandbox_id": resumed_id})
+            assert again["status"] == "already_deleted", again
+
+            # Second explicit termination, without prior resume, also retains
+            # the snapshot, which can be independently deleted.
             second = call("create_sandbox", {
                 "lifetime_seconds": 360,
                 "cpu": 0.125,
@@ -120,11 +139,21 @@ def verify():
             second_id = second["sandbox_id"]
             identifiers.append(second_id)
             result = call("terminate_sandbox", {"sandbox_id": second_id})
-            assert result["terminated"] is True and result["exit_snapshot"]["deleted"], result
-            print("Fresh Sandbox explicit termination removed Exit Snapshot", flush=True)
+            assert result["terminated"] is True and not result["snapshot_deleted"], result
+            assert result["exit_snapshot"]["status"] == "ready", result
+            removed = call("delete_snapshot", {"sandbox_id": second_id})
+            assert removed["deleted"] is True, removed
+            # Clean up the original source snapshot left after resume.
+            original_removed = call("delete_snapshot", {"sandbox_id": first_id})
+            assert original_removed["deleted"] is True, original_removed
+            print("Explicit snapshot deletion succeeded", flush=True)
+
+            listed = call("list_snapshots", {})
+            assert all(row["sandbox_id"] not in identifiers
+                       for row in listed["snapshots"]), listed
 
             return {"pricing": "OK", "snapshot": "OK", "resume": "OK",
-                    "delete_on_terminate": "OK"}
+                    "retain_on_terminate": "OK", "explicit_delete": "OK"}
         finally:
             # Avoid orphan computation if RPC fails.
             for sandbox_id in identifiers:

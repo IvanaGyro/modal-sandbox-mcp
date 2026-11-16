@@ -109,8 +109,10 @@ dedicated encryption key, rate limits and additional auditing.
 | `create_upload_link` | Short-lived signed HTTPS PUT for binary files up to **256 MiB** |
 | `revoke_download_link` | Immediately delete staged export and invalidate its URL |
 | `sandbox_status` | Check running state |
-| `terminate_sandbox` | Stop computation, wait for Exit Snapshot, then delete it if possible |
+| `terminate_sandbox` | Stop computation and retain the Exit Snapshot |
 | `resume_sandbox` | Restore a stopped Sandbox from its Exit Snapshot (new Sandbox ID) |
+| `list_snapshots` | List indexed, stopped Sandbox Exit Snapshots and their readiness (paginated) |
+| `delete_snapshot` | Explicitly delete one stopped Sandbox Exit Snapshot by its original Sandbox ID |
 
 **One read operation; no offset or paging for file contents:**
 `read_path(sandbox_id, path, expires_in_seconds=600)` inspects the path and
@@ -168,14 +170,31 @@ or later price changes can affect cost. Active time also incurs compute costs.
 Rates were checked November 16, 2026:
 [Modal pricing](https://modal.com/pricing).
 
-**Explicit `terminate_sandbox` deletes the resulting Exit Snapshot:** Modal
-creates a snapshot even on `terminate()`. Our MCP waits for that snapshot,
-obtains its Image ID, and attempts `modal.experimental.image_delete()`.
-The response reports `exit_snapshot.status` and `deleted`. If creation or
-deletion fails or times out, it reports `not_deleted` rather than falsely
-claiming success; such snapshots automatically expire after ~30 days. A
-successfully deleted snapshot cannot be resumed. Avoid manually terminating
-via the Modal SDK when you want the MCP's delete-on-close behavior.
+**Terminating does not delete an Exit Snapshot.** `terminate_sandbox(id)`
+stops the Sandbox, then checks the automatically created snapshot and returns
+`exit_snapshot.status` (`ready`, `pending`, or `unavailable`) and its Image
+ID when ready. Modal retains Exit Snapshots for **30 days** after creation;
+this TTL cannot be configured through the Exit Snapshot API.
+
+`delete_snapshot(sandbox_id)` is the **only MCP lifecycle operation that
+explicitly deletes an Exit Snapshot**. Supply the original stopped Sandbox ID
+(not the Image ID). The MCP checks ownership tags, refuses running Sandboxes,
+and calls `modal.experimental.image_delete()`. The result includes
+`deleted: true` only on success (or if this MCP recorded an earlier successful
+deletion); on failure it returns `status: not_deleted`. Once deleted, the
+snapshot cannot be resumed. Deleting the Exit Snapshot does not delete the
+Sandbox's base Image or mounted Volumes.
+
+`list_snapshots(offset=0, limit=50)` lists non-deleted Exit Snapshots whose
+Sandbox IDs were registered in the persistent
+`modal-sandbox-mcp-snapshot-index` Volume. It reports `ready`, `pending`,
+or `unavailable` using a non-blocking Modal lookup. It omits running
+Sandboxes. The listing is an **index, not a guarantee** that a snapshot can be
+restored: Exit Snapshots may expire or fail. Sandboxes created before this
+inventory was introduced do not appear automatically in this list, but a
+known original ID may still be passed to `resume_sandbox` or
+`delete_snapshot`. This deliberately avoids creating manual snapshots or
+running an additional TTL cleanup service.
 
 Exit Snapshots are Beta and are not a durable backup guarantee (rare hardware
 failure, possible snapshot error). Use `persistent_workspace=True` plus
@@ -295,8 +314,9 @@ Useful tests:
 - `smoke_mcp.py` — legacy bearer, tool discovery and anonymous denial.
 - `smoke_sandbox.py` — original six tool calls using the legacy bearer.
 - `smoke_sandbox_images.py` — real public registry Image selection and Python bootstrap.
-- `smoke_exit_snapshots.py` — live calculated idle policy, exit snapshot restore,
-  explicit termination and Image deletion.
+- `smoke_exit_snapshots.py` — live idle policy, Exit Snapshot restore,
+  retention on termination, listing, and independent Image deletion
+  (requires the updated MCP to have been deployed).
 - `smoke_transfer_100mb.py` — 100 MiB HTTP PUT/GET SHA-256 roundtrip,
   ZIP directory export, automatic small-text read and cross-Sandbox Volume persistence.
 - `smoke_read_path.py` — live inline/large/binary/ZIP routing and deprecated-tool absence.

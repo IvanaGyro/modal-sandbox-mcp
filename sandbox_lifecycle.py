@@ -100,6 +100,11 @@ def delete_exit_snapshot_of(
         snapshot_enabled = sandbox.get_tags().get("mcp_exit_snapshot") == "1"
     if not snapshot_enabled:
         return {"status": "not_enabled", "deleted": False}
+    if sandbox.poll() is None:
+        return {
+            "status": "running", "deleted": False,
+            "message": "A running Sandbox cannot have an Exit Snapshot deleted.",
+        }
 
     try:
         snapshot = sandbox._experimental_get_exit_snapshot(timeout=timeout_seconds)

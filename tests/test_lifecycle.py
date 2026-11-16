@@ -88,6 +88,17 @@ class ExitSnapshotTests(unittest.TestCase):
         self.assertFalse(result["deleted"])
         self.assertEqual(result["status"], "not_deleted")
 
+    def test_running_sandbox_snapshot_is_not_deleted(self):
+        sb = Mock()
+        sb.get_tags.return_value = {"mcp_exit_snapshot": "1"}
+        sb.poll.return_value = None
+        api = Mock()
+        result = delete_exit_snapshot_of(sb, api)
+        self.assertEqual(result["status"], "running")
+        self.assertFalse(result["deleted"])
+        api.experimental.image_delete.assert_not_called()
+        sb._experimental_get_exit_snapshot.assert_not_called()
+
     def test_no_snapshot_on_legacy_sandbox(self):
         sb = Mock()
         sb.get_tags.return_value = {}
