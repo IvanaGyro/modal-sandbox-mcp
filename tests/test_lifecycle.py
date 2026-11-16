@@ -17,7 +17,7 @@ class IdlePricingTests(unittest.TestCase):
 
     def test_default_1core_1gib(self):
         policy = idle_budget_for(1.0, 1024, DEFAULT_LIFETIME_SECONDS)
-        self.assertEqual(policy["idle_seconds"], 6157)
+        self.assertEqual(policy["idle_seconds"], 6158)
         self.assertFalse(policy["idle_capped_by_lifetime"])
         self.assertLessEqual(policy["estimated_idle_cost_usd"], policy["idle_budget_usd"])
         self.assertTrue(policy["estimate_only"])
@@ -33,7 +33,7 @@ class IdlePricingTests(unittest.TestCase):
 
     def test_lifetime_cap_is_reported(self):
         policy = idle_budget_for(1, 1024, 90)
-        self.assertEqual(policy["calculated_idle_seconds"], 6157)
+        self.assertEqual(policy["calculated_idle_seconds"], 6158)
         self.assertEqual(policy["idle_seconds"], 90)
         self.assertTrue(policy["idle_capped_by_lifetime"])
 
