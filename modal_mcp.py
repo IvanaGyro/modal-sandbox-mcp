@@ -10,6 +10,7 @@ import os
 import modal
 from typing import Literal
 from sandbox_images import resolve_sandbox_image
+from path_reader import inspect_path
 from oauth_support import AUTH_VOLUME, github_oauth, require_authorized_owner
 from transfer_http import (
     TRANSFER_VOLUME, WORKSPACE_VOLUME, install_transfer_routes,
@@ -25,7 +26,7 @@ app = modal.App(APP_NAME)
 # arbitrary user commands in the control-plane container.
 web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastmcp>=3.4,<3.5", "pydantic>=2,<3"
-).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http").add_local_python_source("sandbox_images")
+).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http").add_local_python_source("sandbox_images").add_local_python_source("path_reader")
 sandbox_image = modal.Image.debian_slim(python_version="3.12").apt_install(
     "bash", "git", "curl", "ca-certificates", "build-essential"
 )
@@ -218,47 +219,37 @@ def mcp_web():
             sb.detach()
 
     @mcp.tool
-    def read_file(
+    def read_path(
         sandbox_id: str,
         path: str,
-        offset: int = 0,
-        max_bytes: int = 8192,
+        expires_in_seconds: int = 600,
     ) -> dict:
-        """Read a bounded UTF-8 byte range; use next_offset to continue.
+        """Read a Sandbox path without offsets or large MCP responses.
 
-        Defaults to 8 KiB rather than returning whole files into ChatGPT.
-        For binary files or large downloads use create_download_link.
+        Small UTF-8 text (up to 8192 bytes) is returned inline. Large or
+        binary files yield a signed HTTPS download link. Directories are
+        exported as a ZIP with a signed download link. URLs expire after
+        expires_in_seconds (60–3600); use revoke_download_link to revoke.
         """
         require_authorized_owner()
         path = safe_path(path)
-        if offset < 0:
-            raise ValueError("offset must be nonnegative")
-        if not 256 <= max_bytes <= 16384:
-            raise ValueError("max_bytes must be 256–16384")
-        code = (
-            "import codecs,json,os,sys;"
-            "p=sys.argv[1];start=int(sys.argv[2]);n=int(sys.argv[3]);"
-            "f=open(p,'rb');f.seek(start);part=f.read(n);"
-            "dec=codecs.getincrementaldecoder('utf-8')(errors='strict');"
-            "text=dec.decode(part,final=False);"
-            "used=len(part)-len(dec.getstate()[0]);"
-            "size=os.fstat(f.fileno()).st_size;"
-            "print(json.dumps(dict(content=text,offset=start,next_offset=start+used,"
-            "size_bytes=size,eof=start+used>=size),ensure_ascii=False))"
-        )
         sb = _get_sandbox(sandbox_id)
         try:
-            process = sb.exec(
-                "python", "-c", code, path, str(offset), str(max_bytes), timeout=15
-            )
-            output = process.stdout.read()
-            error = process.stderr.read()
-            code = process.wait()
-            if code != 0:
-                raise RuntimeError("Cannot read UTF-8 chunk; verify offset and encoding: " + _clip(error, 600))
-            return {"path": path, **__import__("json").loads(output)}
+            decision = inspect_path(sb.filesystem, path)
         finally:
             sb.detach()
+        if decision["delivery"] == "inline":
+            return decision
+        staged = stage_download(
+            sandbox_id, path, expires_in_seconds,
+            archive_directory=decision["kind"] == "directory",
+        )
+        return {
+            **decision,
+            **staged,
+            "delivery": "download",
+            "kind": decision["kind"],
+        }
 
     @mcp.tool
     def write_file(sandbox_id: str, path: str, content: str) -> dict:
@@ -402,23 +393,6 @@ def mcp_web():
             sb.detach()
         return make_upload_link(sandbox_id, path, size_bytes, sha256,
                                 expires_in_seconds)
-
-    @mcp.tool
-    def create_download_link(
-        sandbox_id: str, path: str, expires_in_seconds: int = 600,
-    ) -> dict:
-        """Stage a snapshot of a Sandbox file and return a short-lived HTTPS GET."""
-        require_authorized_owner()
-        return stage_download(sandbox_id, path, expires_in_seconds)
-
-    @mcp.tool
-    def create_directory_download_link(
-        sandbox_id: str, path: str, expires_in_seconds: int = 600,
-    ) -> dict:
-        """Archive a Sandbox directory as ZIP, then return a signed HTTPS GET."""
-        require_authorized_owner()
-        return stage_download(sandbox_id, path, expires_in_seconds,
-                              archive_directory=True)
 
     @mcp.tool
     def revoke_download_link(download_url: str) -> dict:
