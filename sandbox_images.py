@@ -41,7 +41,11 @@ def resolve_sandbox_image(
         raise ValueError("image_add_python is only valid for registry images")
 
     if image_source == "registry":
-        if not _REGISTRY_REF.fullmatch(image_ref) or "://" in image_ref:
+        if (
+            not _REGISTRY_REF.fullmatch(image_ref)
+            or "://" in image_ref
+            or ("@" in image_ref and not re.search(r"@sha256:[a-fA-F0-9]{64}\\Z", image_ref))
+        ):
             raise ValueError("Invalid public OCI/Docker registry image reference")
         if image_add_python is not None and (
             not isinstance(image_add_python, str)
