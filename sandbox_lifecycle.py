@@ -86,14 +86,19 @@ def restored_settings(tags: dict[str, str]) -> tuple[float, int, int, bool]:
     return cpu, memory_mib, lifetime_seconds, persistent
 
 
-def delete_exit_snapshot_of(sandbox, modal_api, timeout_seconds: int = 45) -> dict:
+def delete_exit_snapshot_of(
+    sandbox, modal_api, timeout_seconds: int = 45,
+    snapshot_enabled: bool | None = None,
+) -> dict:
     """Delete only this Sandbox instance's Exit Snapshot, never its base Image.
 
     Must run after termination; failure returns an explicit *not deleted*
     status. No deletion is claimed until modal.experimental.image_delete
     succeeds.
     """
-    if sandbox.get_tags().get("mcp_exit_snapshot") != "1":
+    if snapshot_enabled is None:
+        snapshot_enabled = sandbox.get_tags().get("mcp_exit_snapshot") == "1"
+    if not snapshot_enabled:
         return {"status": "not_enabled", "deleted": False}
 
     try:
