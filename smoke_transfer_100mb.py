@@ -159,6 +159,28 @@ def main_test():
             })
             assert part["content"] == "繁體中文🌈abcd", part
             assert part["eof"] is True
+            folder = "/workspace/mcp-transfer-test-dir"
+            invoke("make_directory", {"sandbox_id": sandbox_id, "path": folder})
+            invoke("write_file", {"sandbox_id": sandbox_id, "path": folder + "/a.txt",
+                                  "content": "archive test A"})
+            invoke("write_file", {"sandbox_id": sandbox_id, "path": folder + "/b.txt",
+                                  "content": "archive test B"})
+            zipped = invoke("create_directory_download_link", {
+                "sandbox_id": sandbox_id, "path": folder, "expires_in_seconds": 1800,
+            })
+            assert zipped["filename"].endswith(".zip"), zipped
+            import zipfile
+            from io import BytesIO
+            with httpx.Client(timeout=120) as http:
+                zip_result = http.get(zipped["download_url"])
+            assert zip_result.status_code == 200, zip_result.status_code
+            with zipfile.ZipFile(BytesIO(zip_result.content)) as archive:
+                names = archive.namelist()
+                assert any(x.endswith("/a.txt") for x in names), names
+                assert any(x.endswith("/b.txt") for x in names), names
+            invoke("revoke_download_link", {"download_url": zipped["download_url"]})
+            print("Directory ZIP export and revocation: OK", flush=True)
+
             invoke("commit_workspace", {"sandbox_id": sandbox_id})
             listed = invoke("list_directory", {
                 "sandbox_id": sandbox_id, "path": "/workspace"
@@ -167,6 +189,29 @@ def main_test():
             print("UTF-8 paged read, directory listing, persistent-volume commit: OK",
                   flush=True)
 
+            # Verify that the committed state is visible in a different Sandbox.
+            secondary_id = None
+            try:
+                secondary = invoke("create_sandbox", {
+                    "lifetime_seconds": 300, "idle_seconds": 180,
+                    "cpu": 0.125, "memory_mib": 256,
+                    "persistent_workspace": True,
+                })
+                secondary_id = secondary["sandbox_id"]
+                persisted = invoke("read_file", {
+                    "sandbox_id": secondary_id, "path": text_path,
+                    "max_bytes": 256,
+                })
+                assert persisted["content"] == "繁體中文🌈abcd"
+                print("Persistent Volume recovered in a second Sandbox: OK", flush=True)
+                invoke("remove_path", {"sandbox_id": secondary_id, "path": text_path})
+                invoke("remove_path", {
+                    "sandbox_id": secondary_id, "path": folder, "recursive": True,
+                })
+                invoke("commit_workspace", {"sandbox_id": secondary_id})
+            finally:
+                if secondary_id:
+                    invoke("terminate_sandbox", {"sandbox_id": secondary_id})
             invoke("remove_path", {"sandbox_id": sandbox_id, "path": src})
             print("Remote 100 MiB test file deleted", flush=True)
         finally:
