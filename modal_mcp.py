@@ -88,6 +88,19 @@ def _get_sandbox(sandbox_id: str):
 
 
 @app.function(
+    image=modal.Image.debian_slim(python_version="3.12"),
+    volumes={"/transfer-staging": TRANSFER_VOLUME},
+    schedule=modal.Period(hours=1),
+)
+def cleanup_transfer_cache():
+    """Remove expired export files and consumed upload-token markers."""
+    removed = _cleanup_exports()
+    if removed:
+        TRANSFER_VOLUME.commit()
+    return {"removed": removed}
+
+
+@app.function(
     image=web_image,
     secrets=[modal.Secret.from_name("modal-mcp-auth")],
     timeout=180,
@@ -366,6 +379,15 @@ def mcp_web():
         """Stage a snapshot of a Sandbox file and return a short-lived HTTPS GET."""
         require_authorized_owner()
         return stage_download(sandbox_id, path, expires_in_seconds)
+
+    @mcp.tool
+    def create_directory_download_link(
+        sandbox_id: str, path: str, expires_in_seconds: int = 600,
+    ) -> dict:
+        """Archive a Sandbox directory as ZIP, then return a signed HTTPS GET."""
+        require_authorized_owner()
+        return stage_download(sandbox_id, path, expires_in_seconds,
+                              archive_directory=True)
 
     @mcp.tool
     def revoke_download_link(download_url: str) -> dict:
