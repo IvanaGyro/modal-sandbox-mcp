@@ -8,6 +8,7 @@ on:
       - "modal_mcp.py"
       - "smoke_passphrase_oauth.py"
       - "smoke_chatgpt_cimd.py"
+      - "smoke_passphrase_volume.py"
       - ".github/workflows/passphrase-oauth-test.yml"
   workflow_dispatch:
 
@@ -34,3 +35,5 @@ jobs:
         run: modal run smoke_passphrase_oauth.py
       - name: Verify real ChatGPT CIMD metadata and authorization redirect
         run: modal run smoke_chatgpt_cimd.py
+      - name: Verify actual Modal Volume encrypted state persistence
+        run: modal run smoke_passphrase_volume.py
