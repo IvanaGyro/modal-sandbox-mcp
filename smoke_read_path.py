@@ -89,7 +89,7 @@ def verify_read_path():
 
         try:
             created = call("create_sandbox", {
-                "lifetime_seconds": 300, "idle_seconds": 240,
+                "lifetime_seconds": 300,
                 "cpu": 0.125, "memory_mib": 256,
             })
             sandbox_id = created["sandbox_id"]
