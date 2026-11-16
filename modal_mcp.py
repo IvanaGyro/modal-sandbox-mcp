@@ -17,7 +17,7 @@ app = modal.App(APP_NAME)
 # arbitrary user commands in the control-plane container.
 web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastmcp>=3.4,<3.5", "pydantic>=2,<3"
-).add_local_python_source("oauth_support")
+).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth")
 sandbox_image = modal.Image.debian_slim(python_version="3.12").apt_install(
     "bash", "git", "curl", "ca-certificates", "build-essential"
 )
@@ -34,6 +34,12 @@ def _auth_from_environment():
     from pydantic import AnyHttpUrl
 
     mode = os.getenv("MCP_AUTH_MODE", "").strip().lower()
+    if mode == "passphrase":
+        from passphrase_oauth import PassphraseOAuthProvider
+
+        return PassphraseOAuthProvider(
+            passphrase=os.environ.get("MCP_AUTH_PASSPHRASE", "")
+        )
     if mode == "github":
         return github_oauth()
     if mode == "oauth":
@@ -58,7 +64,7 @@ def _auth_from_environment():
         if len(token) < 32:
             raise RuntimeError("MCP_DEV_BEARER_TOKEN must be at least 32 characters")
         return StaticTokenVerifier(tokens={token: {"client_id": "private-dev-client", "scopes": ["sandbox"]}})
-    raise RuntimeError("MCP_AUTH_MODE must be github, oauth, or static-dev; unauthenticated mode is forbidden")
+    raise RuntimeError("MCP_AUTH_MODE must be passphrase, github, oauth, or static-dev; unauthenticated mode is forbidden")
 
 
 def _clip(value: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
@@ -84,7 +90,16 @@ def mcp_web():
     """FastMCP handles MCP protocol, OAuth metadata and HTTP sessions."""
     from fastmcp import FastMCP
 
-    mcp = FastMCP("Modal Sandbox MCP", auth=_auth_from_environment())
+    auth_provider = _auth_from_environment()
+    mcp = FastMCP("Modal Sandbox MCP", auth=auth_provider)
+
+    if os.getenv("MCP_AUTH_MODE", "").strip().lower() == "passphrase":
+        from starlette.requests import Request
+
+        @mcp.custom_route("/consent", methods=["GET", "POST"])
+        async def oauth_consent(request: Request):
+            return await auth_provider.consent(request)
+
 
     @mcp.tool
     def create_sandbox(
