@@ -1,0 +1,33 @@
+name: Self-hosted OAuth Protocol Tests
+on:
+  push:
+    branches: [main]
+    paths:
+      - "passphrase_oauth.py"
+      - "oauth_support.py"
+      - "modal_mcp.py"
+      - "smoke_passphrase_oauth.py"
+      - ".github/workflows/passphrase-oauth-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oauth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Source syntax
+        run: python -m compileall -q modal_mcp.py oauth_support.py passphrase_oauth.py smoke_passphrase_oauth.py
+      - run: python -m pip install 'modal>=1.6,<2'
+      - name: Run isolated OAuth DCR and PKCE end-to-end tests in Modal
+        run: modal run smoke_passphrase_oauth.py
