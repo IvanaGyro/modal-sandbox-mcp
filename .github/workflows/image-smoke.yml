@@ -1,0 +1,32 @@
+name: Sandbox Image Selection Integration Test
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/image-smoke.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modal-sandbox-image-smoke
+  cancel-in-progress: false
+
+jobs:
+  image-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify image smoke test syntax
+        run: python -m compileall -q smoke_sandbox_images.py
+      - run: python -m pip install 'modal>=1.6,<2'
+      - name: Validate real Docker registry Images over MCP
+        run: modal run smoke_sandbox_images.py
