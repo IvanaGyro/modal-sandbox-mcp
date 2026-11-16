@@ -84,6 +84,7 @@ class PassphraseOAuthProvider(InMemoryOAuthProvider):
         state_file: Path | None = None,
         volume_commit: bool = True,
         allowed_redirect_hosts: frozenset[str] = frozenset({"chatgpt.com"}),
+        legacy_bearer: str | None = None,
     ) -> None:
         if len(passphrase) < 32:
             raise ValueError("MCP_AUTH_PASSPHRASE needs at least 32 characters")
@@ -100,6 +101,12 @@ class PassphraseOAuthProvider(InMemoryOAuthProvider):
         self.resource = base_url.rstrip("/") + "/mcp"
         self.owner_subject = "modal-sandbox-owner"
         self._passphrase_digest = hashlib.sha256(passphrase.encode()).digest()
+        # Optional temporary migration support for the existing development
+        # bearer. Kept only while MCP_AUTH_MODE is static-dev.
+        self._legacy_bearer_digest = (
+            hashlib.sha256(legacy_bearer.encode()).digest()
+            if legacy_bearer is not None else None
+        )
         self._fernet = Fernet(base64.urlsafe_b64encode(
             hashlib.sha256(("modal-selfhosted-oauth-state-v1:" + passphrase).encode()).digest()
         ))
@@ -384,6 +391,18 @@ class PassphraseOAuthProvider(InMemoryOAuthProvider):
             await self._persist()
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        if self._legacy_bearer_digest is not None and hmac.compare_digest(
+            hashlib.sha256(token.encode()).digest(), self._legacy_bearer_digest
+        ):
+            return AccessToken(
+                token=token,
+                client_id="legacy-dev-client",
+                scopes=[SCOPE],
+                expires_at=int(time.time() + 3600),
+                resource=self.resource,
+                subject=self.owner_subject,
+                claims={"sub": self.owner_subject},
+            )
         verified = await super().verify_token(token)
         if (
             verified is None
