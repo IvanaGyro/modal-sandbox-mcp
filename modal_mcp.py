@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 
 import modal
+from oauth_support import AUTH_VOLUME, github_oauth, require_authorized_owner
 
 APP_NAME = "modal-sandbox-mcp"
 app = modal.App(APP_NAME)
@@ -15,8 +16,8 @@ app = modal.App(APP_NAME)
 # The web app and the sandbox use separate images. A web request never executes
 # arbitrary user commands in the control-plane container.
 web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
-    "fastmcp>=2.13,<4", "pydantic>=2,<3"
-)
+    "fastmcp>=3.4,<3.5", "pydantic>=2,<3"
+).add_local_python_source("oauth_support")
 sandbox_image = modal.Image.debian_slim(python_version="3.12").apt_install(
     "bash", "git", "curl", "ca-certificates", "build-essential"
 )
@@ -33,6 +34,8 @@ def _auth_from_environment():
     from pydantic import AnyHttpUrl
 
     mode = os.getenv("MCP_AUTH_MODE", "").strip().lower()
+    if mode == "github":
+        return github_oauth()
     if mode == "oauth":
         keys = ["MCP_JWKS_URI", "MCP_ISSUER", "MCP_AUDIENCE", "MCP_AUTHORIZATION_SERVER", "MCP_BASE_URL"]
         missing = [key for key in keys if not os.getenv(key)]
@@ -55,7 +58,7 @@ def _auth_from_environment():
         if len(token) < 32:
             raise RuntimeError("MCP_DEV_BEARER_TOKEN must be at least 32 characters")
         return StaticTokenVerifier(tokens={token: {"client_id": "private-dev-client", "scopes": ["sandbox"]}})
-    raise RuntimeError("MCP_AUTH_MODE must be 'oauth' or 'static-dev'; unauthenticated mode is forbidden")
+    raise RuntimeError("MCP_AUTH_MODE must be github, oauth, or static-dev; unauthenticated mode is forbidden")
 
 
 def _clip(value: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
@@ -72,7 +75,8 @@ def _get_sandbox(sandbox_id: str):
     image=web_image,
     secrets=[modal.Secret.from_name("modal-mcp-auth")],
     timeout=180,
-    max_containers=2,
+    max_containers=1,
+    volumes={"/oauth-state": AUTH_VOLUME},
 )
 @modal.concurrent(max_inputs=8)
 @modal.asgi_app()
@@ -90,6 +94,7 @@ def mcp_web():
         memory_mib: int = 1024,
     ) -> dict:
         """Create an isolated Linux shell. Resource requests incur Modal charges."""
+        require_authorized_owner()
         if not 60 <= lifetime_seconds <= 3600:
             raise ValueError("lifetime_seconds must be 60–3600")
         if not 30 <= idle_seconds <= lifetime_seconds:
@@ -115,6 +120,7 @@ def mcp_web():
     @mcp.tool
     def exec_command(sandbox_id: str, command: str, timeout_seconds: int = 30) -> dict:
         """Run a shell command in an existing sandbox. Results are size-limited."""
+        require_authorized_owner()
         if not command or len(command) > 8000:
             raise ValueError("command must contain 1–8000 characters")
         if not 1 <= timeout_seconds <= MAX_COMMAND_SECONDS:
@@ -135,6 +141,7 @@ def mcp_web():
     @mcp.tool
     def read_file(sandbox_id: str, path: str) -> dict:
         """Read a UTF-8 text file from a sandbox, up to 100 KiB."""
+        require_authorized_owner()
         if not path.startswith("/") or len(path) > 1024:
             raise ValueError("path must be absolute")
         sb = _get_sandbox(sandbox_id)
@@ -151,6 +158,7 @@ def mcp_web():
     @mcp.tool
     def write_file(sandbox_id: str, path: str, content: str) -> dict:
         """Write one UTF-8 file in the sandbox (100 KiB maximum)."""
+        require_authorized_owner()
         if not path.startswith("/") or len(path) > 1024:
             raise ValueError("path must be absolute")
         data = content.encode("utf-8")
@@ -169,6 +177,7 @@ def mcp_web():
     @mcp.tool
     def sandbox_status(sandbox_id: str) -> dict:
         """Check whether a sandbox is running or has exited."""
+        require_authorized_owner()
         sb = _get_sandbox(sandbox_id)
         try:
             code = sb.poll()
@@ -179,6 +188,7 @@ def mcp_web():
     @mcp.tool
     def terminate_sandbox(sandbox_id: str) -> dict:
         """Terminate a sandbox to stop its compute usage."""
+        require_authorized_owner()
         sb = _get_sandbox(sandbox_id)
         try:
             sb.terminate()
