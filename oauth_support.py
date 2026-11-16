@@ -97,7 +97,11 @@ def require_authorized_owner() -> None:
     if token is None:
         raise PermissionError("Missing authorized identity")
     claims = token.claims or {}
-    if mode == "github":
+    if mode == "passphrase":
+        from passphrase_oauth import SCOPE, RESOURCE
+        if token.subject != "modal-sandbox-owner" or token.resource != RESOURCE or SCOPE not in token.scopes:
+            raise PermissionError("OAuth token does not grant owner sandbox access")
+    elif mode == "github":
         expected = os.getenv("MCP_GITHUB_ALLOWED_LOGIN", "IvanaGyro")
         if str(claims.get("login", "")).casefold() != expected.casefold():
             raise PermissionError("This GitHub account cannot execute sandbox commands")
