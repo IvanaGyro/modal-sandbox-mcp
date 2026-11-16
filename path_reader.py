@@ -16,7 +16,9 @@ def inspect_path(filesystem, path: str) -> dict:
     if the bytes exceed the configured limit.
     """
     info = filesystem.stat(path)
-    item_type = str(info.type).lower()
+    # Modal exposes FileType enums; avoid matching "file" in the prefix
+    # "FileType.SYMLINK" (which would incorrectly treat a symlink as a file).
+    item_type = str(getattr(info.type, "name", info.type)).rsplit(".", 1)[-1].lower()
     if "directory" in item_type:
         return {"path": path, "kind": "directory", "delivery": "download",
                 "format": "zip"}
