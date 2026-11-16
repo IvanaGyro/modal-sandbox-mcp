@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 
 import modal
+import modal.experimental
 from typing import Literal
 from sandbox_images import resolve_sandbox_image
 from sandbox_lifecycle import (
@@ -300,7 +301,7 @@ def mcp_web():
             if tags.get("mcp_exit_snapshot") != "1":
                 snapshot = {"status": "not_enabled", "deleted": False}
             else:
-                snapshot = delete_exit_snapshot_of(sb, modal, timeout_seconds=45)
+                snapshot = delete_exit_snapshot_of(sb, modal, timeout_seconds=45, snapshot_enabled=True)
             return {
                 "sandbox_id": sandbox_id,
                 "terminated": True,
