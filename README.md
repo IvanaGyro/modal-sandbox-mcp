@@ -97,7 +97,7 @@ dedicated encryption key, rate limits and additional auditing.
 
 | Tool | Function |
 |---|---|
-| `create_sandbox` | CPU-only Linux Sandbox, selectable Image, optionally shared persistent `/workspace` |
+| `create_sandbox` | CPU Sandbox, selectable Image, automatic CPU/RAM idle budget, Exit Snapshot, optional persistent `/workspace` |
 | `exec_command` | Shell command, up to 45 seconds per call |
 | `read_path` | Automatically inline small UTF-8 files, link larger/binary files, or ZIP directories |
 | `write_file` | UTF-8 text file write, up to 100,000 bytes |
@@ -109,7 +109,8 @@ dedicated encryption key, rate limits and additional auditing.
 | `create_upload_link` | Short-lived signed HTTPS PUT for binary files up to **256 MiB** |
 | `revoke_download_link` | Immediately delete staged export and invalidate its URL |
 | `sandbox_status` | Check running state |
-| `terminate_sandbox` | Stop sandbox computation |
+| `terminate_sandbox` | Stop computation, wait for Exit Snapshot, then delete it if possible |
+| `resume_sandbox` | Restore a stopped Sandbox from its Exit Snapshot (new Sandbox ID) |
 
 **One read operation; no offset or paging for file contents:**
 `read_path(sandbox_id, path, expires_in_seconds=600)` inspects the path and
@@ -125,6 +126,61 @@ Text containing NUL/control bytes is treated as binary, even when UTF-8
 decoding succeeds. Large files never enter MCP JSON-RPC responses. The
 `read_path` API does **not** accept `offset` or `max_bytes`; it always
 returns the entire small text file or a link to the exported complete file.
+
+### Auto Exit Snapshots and resource-based idle duration
+
+New Sandboxes automatically enable Modal **Exit Snapshots**. If a Sandbox
+ends due to idle timeout, lifetime timeout, or a process exit, its filesystem
+can be recovered with `resume_sandbox(sandbox_id)` (within Modal's default
+30-day snapshot retention). A resumed session has a **new Sandbox ID**;
+filesystem data is restored but processes/RAM are not. Mounted Volumes are
+managed separately and are not part of an Exit Snapshot.
+
+**Automatic idle budget:** The reference is the cost of **one Modal Sandbox
+physical CPU core for two hours** (CPU only, not a particular RAM size):
+
+```text
+budget = 7200 seconds × $0.00003942 / core-second = $0.283824
+estimated_rate = cpu_cores × $0.00003942
+               + (memory_mib / 1024) × $0.00000667  (USD/second)
+calculated_idle_seconds = floor(budget / estimated_rate)
+effective_idle_seconds = min(calculated_idle_seconds, lifetime_seconds)
+```
+
+| Reserved resources | Calculated idle duration | Effective by default |
+|---|---:|---:|
+| 0.125 CPU + 128 MiB | 49,264 s (~13 h 41 m) | 49,264 s |
+| 1 CPU + 1 GiB | 6,158 s (~1 h 43 m) | 6,158 s |
+| 2 CPU + 4 GiB | 2,689 s (~45 m) | 2,689 s |
+
+`create_sandbox` returns `idle_policy` with the budget, per-second CPU and
+memory rates, raw `calculated_idle_seconds`, applied `idle_seconds`, and
+`idle_capped_by_lifetime`. It also returns `exit_snapshot_enabled: true`.
+The obsolete `idle_seconds` input has been removed: there is no per-Agent
+override; idle is calculated from requested resources.
+
+The default lifetime is **24 hours** to avoid truncating the calculated idle
+window (previously 30 minutes). Agents can request a shorter lifetime
+(`lifetime_seconds` between 60 and 86400), which will also cap idle time.
+The idle policy **is only an estimate, not a billing ceiling**: Modal bills
+the larger of reserved and actual CPU/RAM consumption, and region surcharges
+or later price changes can affect cost. Active time also incurs compute costs.
+Rates were checked November 16, 2026:
+[Modal pricing](https://modal.com/pricing).
+
+**Explicit `terminate_sandbox` deletes the resulting Exit Snapshot:** Modal
+creates a snapshot even on `terminate()`. Our MCP waits for that snapshot,
+obtains its Image ID, and attempts `modal.experimental.image_delete()`.
+The response reports `exit_snapshot.status` and `deleted`. If creation or
+deletion fails or times out, it reports `not_deleted` rather than falsely
+claiming success; such snapshots automatically expire after ~30 days. A
+successfully deleted snapshot cannot be resumed. Avoid manually terminating
+via the Modal SDK when you want the MCP's delete-on-close behavior.
+
+Exit Snapshots are Beta and are not a durable backup guarantee (rare hardware
+failure, possible snapshot error). Use `persistent_workspace=True` plus
+`commit_workspace` when important project data needs stronger persistence.
+Docs: [Exit Snapshots](https://modal.com/docs/guide/sandbox-exit-snapshots).
 
 ### Selecting a Sandbox Image
 
@@ -213,9 +269,10 @@ not private to one session. Changes to identical filenames from concurrent
 Sandboxes can conflict. The workspace survives Sandbox termination; `/tmp`
 does not.
 
-Sandbox lifetime is at most one hour, 2 CPU cores and 4 GiB of RAM.
-The sample defaults are conservative. Sandboxes and Modal Volume storage may
-consume paid resources. **Terminate Sandboxes when finished.**
+Sandbox lifetime is at most 24 hours, with 0.125–2 CPU cores and
+128 MiB–4 GiB RAM. Pricing is budget-derived for idle time, not a spend cap.
+Sandboxes and Modal Volume storage may consume paid resources.
+**Terminate Sandboxes explicitly when finished.**
 
 ## Deployment and testing
 
@@ -238,6 +295,8 @@ Useful tests:
 - `smoke_mcp.py` — legacy bearer, tool discovery and anonymous denial.
 - `smoke_sandbox.py` — original six tool calls using the legacy bearer.
 - `smoke_sandbox_images.py` — real public registry Image selection and Python bootstrap.
+- `smoke_exit_snapshots.py` — live calculated idle policy, exit snapshot restore,
+  explicit termination and Image deletion.
 - `smoke_transfer_100mb.py` — 100 MiB HTTP PUT/GET SHA-256 roundtrip,
   ZIP directory export, automatic small-text read and cross-Sandbox Volume persistence.
 - `smoke_read_path.py` — live inline/large/binary/ZIP routing and deprecated-tool absence.
