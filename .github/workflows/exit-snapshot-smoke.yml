@@ -1,0 +1,33 @@
+name: Exit Snapshot and Idle Budget Integration
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/exit-snapshot-smoke.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modal-exit-snapshot-smoke
+  cancel-in-progress: false
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify lifecycle test syntax
+        run: python -m compileall -q smoke_exit_snapshots.py
+      - name: Install Modal
+        run: python -m pip install 'modal>=1.6,<2'
+      - name: Test live budget, Exit Snapshot, resume, and explicit deletion
+        run: modal run smoke_exit_snapshots.py
