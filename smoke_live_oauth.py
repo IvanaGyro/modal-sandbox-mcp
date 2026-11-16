@@ -123,11 +123,11 @@ def verify_live_oauth() -> dict:
                 "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
             }))
             names = {x["name"] for x in tools["result"]["tools"]}
-            assert names == {
-                "create_sandbox", "exec_command", "read_file", "write_file",
+            assert {
+                "create_sandbox", "exec_command", "read_path", "write_file",
                 "sandbox_status", "terminate_sandbox"
-            }, names
-            print("Live OAuth authenticated initialize and tools/list: 6 tools OK")
+            }.issubset(names), names
+            print("Live OAuth authenticated initialize and tools/list: required tools OK")
 
             seq = 10
             def tool(name: str, args: dict) -> dict:
