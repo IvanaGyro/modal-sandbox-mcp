@@ -1,15 +1,5 @@
 name: Self-hosted OAuth Protocol Tests
 on:
-  push:
-    branches: [main]
-    paths:
-      - "passphrase_oauth.py"
-      - "oauth_support.py"
-      - "modal_mcp.py"
-      - "smoke_passphrase_oauth.py"
-      - "smoke_chatgpt_cimd.py"
-      - "smoke_passphrase_volume.py"
-      - ".github/workflows/passphrase-oauth-test.yml"
   workflow_dispatch:
 
 permissions:
