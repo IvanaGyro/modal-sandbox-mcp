@@ -12,7 +12,7 @@ from sandbox_lifecycle import (
 
 class IdlePricingTests(unittest.TestCase):
     def test_two_core_hours_budget(self):
-        self.assertEqual(str(IDLE_BUDGET_USD), "0.283824")
+        self.assertEqual(IDLE_BUDGET_USD, __import__("decimal").Decimal("0.283824"))
         self.assertEqual(CPU_CORE_USD_PER_SECOND * 7200, IDLE_BUDGET_USD)
 
     def test_default_1core_1gib(self):
