@@ -90,8 +90,8 @@ def verify():
                 rpc("write_file", {
                     "sandbox_id": sandbox_id, "path": path, "content": "custom-image-probe",
                 })
-                read = rpc("read_file", {
-                    "sandbox_id": sandbox_id, "path": path, "max_bytes": 256,
+                read = rpc("read_path", {
+                    "sandbox_id": sandbox_id, "path": path,
                 })
                 assert read["content"] == "custom-image-probe", read
                 print(case["name"] + ": filesystem OK", flush=True)
