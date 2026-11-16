@@ -68,7 +68,7 @@ def verify():
             sandbox_id = None
             try:
                 created = rpc("create_sandbox", {
-                    "lifetime_seconds": 420, "idle_seconds": 240,
+                    "lifetime_seconds": 420,
                     "cpu": 0.125, "memory_mib": 256,
                     **case["kwargs"],
                 })
