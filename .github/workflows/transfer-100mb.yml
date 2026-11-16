@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/transfer-100mb.yml"
   workflow_dispatch:
+# This one-shot 100 MiB regression is opt-in; workflow edits trigger one run.
 
 permissions:
   contents: read
