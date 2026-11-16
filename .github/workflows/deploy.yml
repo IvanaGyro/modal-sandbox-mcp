@@ -40,3 +40,15 @@ jobs:
         run: python -m pip install 'modal>=1.6,<2'
       - name: Deploy MCP control plane
         run: modal deploy modal_mcp.py
+      - name: Smoke test unauthenticated MCP request
+        env:
+          MCP_ENDPOINT: https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/mcp
+        run: |
+          set -euo pipefail
+          payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deployment-smoke-test","version":"1.0"}}}'
+          code=$(curl --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 90 -sS -o /tmp/mcp-smoke-response -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data "$payload" "$MCP_ENDPOINT")
+          echo "Unauthenticated initialize HTTP status: $code"
+          case "$code" in
+            401|403) echo "MCP endpoint requires authorization" ;;
+            *) echo "Unexpected unauthenticated response; review deployment" >&2; exit 1 ;;
+          esac
