@@ -1,123 +1,141 @@
-# Modal Sandbox MCP
+# Modal Sandbox MCP — self-hosted OAuth + ChatGPT
 
-A serverless, **authenticated** Streamable HTTP MCP server that manages isolated Modal Linux Sandboxes. It is deployable with GitHub Actions; no separate VPS is necessary.
+A serverless, authenticated MCP server on Modal that can start isolated Linux
+Sandboxes and execute commands. **Modal hosts both the MCP resource server and
+the OAuth authorization server. No Cloudflare Worker or GitHub OAuth App is
+required.**
 
-## Tools
+## Verified deployment
 
-| Tool | Purpose |
+- MCP URL: `https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/mcp`
+- Authorization server discovery: `https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/.well-known/oauth-authorization-server`
+- Protected resource metadata: `https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/.well-known/oauth-protected-resource/mcp`
+- [Modal deployment](https://modal.com/apps/ivanagyro/main/deployed/modal-sandbox-mcp)
+- [Live OAuth + tool execution test](https://github.com/IvanaGyro/modal-sandbox-mcp/actions/runs/43817281535)
+- [Self-hosted OAuth unit/integration and CIMD tests](https://github.com/IvanaGyro/modal-sandbox-mcp/actions/runs/43816578216)
+- [Encrypted Modal Volume cross-container recovery](https://github.com/IvanaGyro/modal-sandbox-mcp/actions/runs/43816784810)
+
+The live test fetched ChatGPT's published CIMD metadata, ran the authorization
+code flow with a passphrase and S256 PKCE, obtained an OAuth bearer token,
+listed all six tools, then created a Sandbox, ran a shell command and terminated
+the Sandbox. **A real ChatGPT plugin login has not yet been performed through
+ChatGPT's user interface.**
+
+## Connect from ChatGPT
+
+1. Open ChatGPT **on the web** → **Plugins** → **Add custom MCP server**.
+2. Enter `Modal Sandbox MCP`, and the MCP URL above.
+3. Select **OAuth**. Prefer **Client ID Metadata Documents (CIMD)**; **DCR**
+   is supported as a fallback. No pre-defined OAuth Client ID or Client Secret
+   is required. The discovery metadata advertises public-client
+   `token_endpoint_auth_methods_supported: ["none", ...]` and S256 PKCE.
+4. When the server displays **Authorize Modal Sandbox MCP**, enter your private
+   passphrase *in that HTTPS consent screen only* and approve.
+5. Complete the ChatGPT connection and test `tools/list`, then a small
+   `create_sandbox` → `exec_command` → `terminate_sandbox` sequence.
+
+**Current bootstrap mode:** `MCP_AUTH_MODE=static-dev` is configured in the
+existing Modal Secret `modal-mcp-auth`. The existing high-entropy
+`MCP_DEV_BEARER_TOKEN` is temporarily used **both** as the OAuth consent
+passphrase **and** as a legacy bearer for the previously tested clients. You
+need your saved copy of that token to enter the consent screen. Do not put it
+in chat, source, environment files committed to git, or GitHub Actions logs.
+
+Use an independent passphrase and disable legacy bearer once connected:
+
+```dotenv
+MCP_AUTH_MODE=passphrase
+MCP_AUTH_PASSPHRASE=<new random string, at least 32 characters>
+```
+
+Set these values in the **Modal Secret**, not GitHub Secrets. Remove
+`MCP_DEV_BEARER_TOKEN` in final passphrase mode. Changing the passphrase also
+changes the current Fernet encryption key: the old encrypted OAuth state must
+be reset and ChatGPT re-authorized. Coordinate this before rotating the secret
+to avoid temporarily disabling the server.
+
+In permanent `passphrase` mode, no legacy static bearer is accepted.
+OAuth access tokens are bound to the MCP resource URI, owner subject and
+required `sandbox` scope.
+
+## OAuth flow and design
+
+```text
+ChatGPT (OAuth client, CIMD or DCR)
+   → Modal /authorize → Modal /consent (passphrase)
+   → Modal /token (S256 PKCE code exchange)
+   → Modal /mcp (resource-bound access token)
+   → Modal Sandbox (isolated Linux execution)
+```
+
+The server uses the FastMCP v3 OAuth base implementation for DCR, authorization
+code exchange, PKCE validation, token refresh and revocation. The custom
+PassphraseOAuthProvider adds interactive, fail-closed consent and durable,
+encrypted persistence.
+
+- CIMD clients are fetched with FastMCP's SSRF-resistant CIMD fetcher and
+  constrained to `https://chatgpt.com/oauth/.../client.json` and HTTPS
+  `chatgpt.com` callback URIs.
+- DCR clients must register HTTPS `chatgpt.com` callback URIs.
+- A passphrase is required for authorization. Incorrect attempts are limited
+  per consent handle. The form uses a short-lived CSRF nonce and secure
+  HttpOnly SameSite cookie.
+- One-use authorization codes, S256 PKCE, short-lived access tokens and rotated
+  refresh tokens are handled by the MCP SDK; refresh tokens expire after 30 days.
+- Registrations, tokens and pending grants are Fernet encrypted and committed
+  to a persistent Modal Volume. A single ASGI container avoids simultaneous
+  writers. The passphrase-derived key is intentionally not stored in GitHub.
+- No unauthenticated access to `/mcp` is allowed.
+
+**Security limitation:** This is a personal, experimental authorization
+server, not an audited general-purpose identity provider. It cannot prove a
+request originated from ChatGPT by DCR alone; it relies on the passphrase.
+For production-grade access controls, consider mTLS, external IdP, a
+dedicated encryption key, rate limits and additional auditing.
+
+## MCP tools
+
+| Tool | Function |
 |---|---|
-| `create_sandbox` | Start a Linux shell with bounded CPU, RAM, lifetime and idle timeout |
-| `exec_command` | Run a short Shell command with bounded output |
-| `read_file` / `write_file` | Transfer small UTF-8 files via the Modal Sandbox filesystem API |
-| `sandbox_status` | Check whether a sandbox is running |
-| `terminate_sandbox` | Stop sandbox compute charges |
+| `create_sandbox` | Start a bounded Modal Linux Sandbox |
+| `exec_command` | Run Shell commands, currently up to 45 seconds each |
+| `read_file` / `write_file` | Transfer small UTF-8 files |
+| `sandbox_status` | Check if the Sandbox is running |
+| `terminate_sandbox` | Stop the Sandbox and charges |
 
-**Limitations:** Shell commands have a 45-second maximum. Jobs needing longer runtimes, GPU-specific images, bulk file transfer, durable volumes and cost caps need additional implementation. The server and its sandboxes may incur Modal charges. It is a starter project, not an audited multi-tenant service.
+Sandbox lifetime is at most one hour, 2 CPU cores and 4 GiB of RAM.
+The sample defaults are deliberately conservative. Sandboxes and Modal Volume
+storage may consume paid resources. **Terminate Sandboxes when finished.**
 
-## Initial setup
+## Deployment and testing
 
-1. Create a **private** repository named `modal-sandbox-mcp` in your GitHub account, or upload this project to any private GitHub repository. Verify its visibility in GitHub Settings; GitHub may default to public.
-2. Register for Modal and obtain a scoped Modal API token.
-3. Add GitHub Actions repository secrets `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. Do not commit tokens or share them in chat.
-4. In Modal, create or edit the secret named `modal-mcp-auth` using one of the authentication modes below.
-5. Push changes to `main` to auto-deploy, or use **Actions → Deploy to Modal → Run workflow**.
-6. Look up the resulting `mcp_web` HTTP URL in Modal deploy output. The MCP URL is that base URL plus `/mcp`.
-7. Connect an MCP client with OAuth support. Note that compatibility with ChatGPT's custom connectors requires an OAuth provider that supports the client's flow; **deployment alone does not mean ChatGPT connection is tested**.
+Store only the Modal deployment credentials in **GitHub Actions Secrets**:
+`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`.
 
-### Recommended: GitHub OAuth (ChatGPT compatible)
+Store runtime authentication credentials in the **Modal Secret** named
+`modal-mcp-auth`. The HTTP application uses that secret at runtime.
+Pushes to `main` that change the server or deployment workflow deploy
+automatically; you can also run
+[Deploy to Modal](https://github.com/IvanaGyro/modal-sandbox-mcp/actions/workflows/deploy.yml)
+manually.
 
-FastMCP's built-in `GitHubProvider` acts as an OAuth proxy and supplies MCP-compatible discovery, Dynamic Client Registration (DCR), authorization-code/PKCE, and JWT access tokens. The MCP server **also checks the signed-in GitHub login on every tool invocation**; authenticating as a different GitHub user does not grant shell access.
+Useful tests:
 
-**The existing static-dev mode remains active until you update the Modal Secret.** The server cannot perform a real GitHub sign-in without the OAuth App credentials created in your account.
+- `smoke_passphrase_oauth.py` — isolated DCR, consent, PKCE, token and refresh.
+- `smoke_chatgpt_cimd.py` — fetch and validate ChatGPT's real CIMD metadata.
+- `smoke_passphrase_volume.py` — encrypted Modal Volume commit and recovery.
+- `smoke_live_oauth.py` — real endpoint, real OAuth, tools/list and Sandbox.
+- `smoke_mcp.py` — legacy bearer, tool discovery and anonymous denial.
+- `smoke_sandbox.py` — all six tool calls using the legacy bearer.
 
-1. Open [GitHub → Developer settings → OAuth Apps](https://github.com/settings/developers) and select **New OAuth App**.
-2. Enter:
-   - Application name: `Modal Sandbox MCP`
-   - Homepage URL: `https://github.com/IvanaGyro/modal-sandbox-mcp`
-   - **Authorization callback URL:** `https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/auth/callback` (do NOT append `/mcp`)
-3. Create the OAuth App and generate a Client Secret. **Do not put either credential in the repository or in ChatGPT.**
-4. Edit the existing [Modal Secret `modal-mcp-auth`](https://modal.com/secrets) to set:
+Use GitHub Actions `workflow_dispatch` for the expensive integration tests.
+The full OAuth suite is manual to avoid repeated Modal App-create rate limits.
+The ordinary `Check` workflow performs lightweight syntax and unit checks.
 
-```dotenv
-MCP_AUTH_MODE=github
-GITHUB_CLIENT_ID=<from GitHub OAuth App>
-GITHUB_CLIENT_SECRET=<from GitHub OAuth App>
-MCP_OAUTH_SIGNING_KEY=<random secret string with at least 32 characters>
-MCP_GITHUB_ALLOWED_LOGIN=IvanaGyro
-MCP_BASE_URL=https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run
-```
+## References
 
-Generate a fresh signing key with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Keep it private and stable. Rotating this signing key invalidates current OAuth access tokens and the encrypted token store. Remove `MCP_DEV_BEARER_TOKEN` when you leave `static-dev`.
-
-5. Redeploy with [Deploy to Modal](https://github.com/IvanaGyro/modal-sandbox-mcp/actions/workflows/deploy.yml) or push a change to the deployment workflow; an updated Secret alone may not restart an existing container.
-6. Check `https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource/mcp`. The CI workflow validates these in GitHub mode.
-7. On **ChatGPT web** (subject to workspace and plan permissions), visit Plugins → **Add custom MCP server**, supply `https://ivanagyro--modal-sandbox-mcp-mcp-web.us-east.modal.run/mcp`, choose OAuth with DCR, and complete **Sign in with GitHub**. Only `IvanaGyro` can execute the six Sandbox tools after login.
-
-**State persistence:** FastMCP client registrations and tokens are encrypted with Fernet and stored on a Modal Volume. The server runs with one ASGI container to avoid concurrent writers to that file store; changes are committed after each mutation. This avoids the short-lived filesystem state of a cold-started serverless container. The volume and service may incur small charges.
-
-**Testing:** `smoke_oauth.py` validates OAuth provider construction with fake values, not a real GitHub login. `smoke_sandbox.py` exercises all six tools through the real static-development bearer and always terminates the test sandbox.
-
-### Alternative: External JWT OAuth provider
-
-If an established IdP already supports the MCP authorization discovery requirements and issues audience-bound JWT tokens, the old `MCP_AUTH_MODE=oauth` option remains available. In this mode **`MCP_ALLOWED_SUB` is mandatory** for granting shell access, and the existing `MCP_JWKS_URI`, `MCP_ISSUER`, `MCP_AUDIENCE`, `MCP_AUTHORIZATION_SERVER`, `MCP_BASE_URL` settings are required.
-
-### External JWT OAuth example
-
-Create a Modal secret named `modal-mcp-auth` with all these environment variables:
-
-```dotenv
-MCP_AUTH_MODE=oauth
-MCP_JWKS_URI=https://YOUR_IDP/.well-known/jwks.json
-MCP_ISSUER=https://YOUR_IDP/
-MCP_AUDIENCE=YOUR_RESOURCE_AUDIENCE
-MCP_AUTHORIZATION_SERVER=https://YOUR_IDP/
-MCP_BASE_URL=https://YOUR_MODAL_ENDPOINT.modal.run
-```
-
-Use a trusted identity provider that supports OAuth Dynamic Client Registration and JWT access tokens with the correct audience, for example a suitably configured WorkOS/Descope environment. Check issuer trailing slashes, resource audience and the real Modal endpoint precisely. The server exposes standards-based OAuth discovery using FastMCP's `RemoteAuthProvider`.
-
-**OAuth credentials are for the MCP client; Modal's API token in GitHub Actions is used only to deploy the app.**
-
-**Important bootstrap note:** Modal creates the HTTP URL during deployment. For an initial bootstrapping deployment, you may need to set `MCP_BASE_URL` from the expected endpoint, deploy, then update the Modal secret after learning the actual URL and redeploy. The endpoint must not be left available without valid authentication.
-
-### Static bearer mode (development only)
-
-For clients that can explicitly send an `Authorization: Bearer ...` HTTP header, create a Modal secret with:
-
-```dotenv
-MCP_AUTH_MODE=static-dev
-MCP_DEV_BEARER_TOKEN=REPLACE_WITH_A_RANDOM_SECRET_LONGER_THAN_32_CHARACTERS
-```
-
-This uses FastMCP's `StaticTokenVerifier`, intended **only for development**, and does **not** implement OAuth discovery suitable for every ChatGPT client. Never use a short, guessable, or reused token. Prefer OAuth for long-lived deployment.
-
-## Deploy manually or with GitHub Actions
-
-On a machine with access to PyPI and a Modal account:
-
-```bash
-python -m pip install 'modal>=1.6,<2'
-modal setup
-modal deploy modal_mcp.py
-```
-
-Alternatively run the GitHub Actions deployment, after creating both GitHub and Modal secrets.
-
-## Cost and safety
-
-- The MCP control plane scales to zero when idle; running Sandboxes and stored OAuth Volume data consume paid resources.
-- `create_sandbox` caps lifetime at 1 hour, idle time at up to that lifetime, 2 CPU cores, and 4 GiB memory.
-- Sandbox IDs are returned to the client. **Keep them**; request-local memory is not persistent.
-- Terminate Sandboxes when finished. Set Modal workspace budget alerts and spending limits.
-- Do not pass Modal deployment credentials, GitHub PATs or unrelated secrets into general-purpose Sandboxes.
-- Do not disable authentication on this public web endpoint: it grants arbitrary code execution in your Modal account.
-
-## Source documentation
-
-- [Modal GitHub Actions deployment](https://modal.com/docs/guide/useful-snippets)
-- [Modal Sandbox Python API](https://modal.com/docs/sdk/py/latest/Sandbox)
-- [Modal ASGI apps](https://modal.com/docs/guide/webhooks)
-- [FastMCP GitHub OAuth](https://gofastmcp.com/docs/integrations/github)
-- [FastMCP OAuth proxy](https://gofastmcp.com/docs/servers/auth/oauth-proxy)
-- [FastMCP remote OAuth](https://gofastmcp.com/docs/servers/auth/remote-oauth)
-- [FastMCP HTTP](https://gofastmcp.com/docs/deployment/http)
+- [OpenAI: plugin authentication](https://developers.openai.com/plugins/build/auth)
+- [FastMCP: full OAuth server](https://gofastmcp.com/servers/auth/full-oauth-server)
+- [FastMCP: HTTP deployment](https://gofastmcp.com/deployment/http)
+- [Modal: Sandbox API](https://modal.com/docs/sdk/py/latest/Sandbox)
+- [Modal: volumes](https://modal.com/docs/guide/volumes)
