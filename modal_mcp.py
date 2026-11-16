@@ -139,6 +139,7 @@ def mcp_web():
             memory=memory_mib,
             workdir="/workspace" if persistent_workspace else "/tmp",
             volumes={"/workspace": WORKSPACE_VOLUME} if persistent_workspace else {},
+            tags={"mcp_persistent_workspace": "1" if persistent_workspace else "0"},
         )
         try:
             return {
@@ -326,9 +327,8 @@ def mcp_web():
         require_authorized_owner()
         sb = _get_sandbox(sandbox_id)
         try:
-            probe = sb.exec("mountpoint", "-q", "/workspace", timeout=15)
-            if probe.wait() != 0:
-                raise ValueError("This Sandbox has no persistent /workspace Volume")
+            if sb.get_tags().get("mcp_persistent_workspace") != "1":
+                raise ValueError("This Sandbox was not created with a persistent workspace")
             process = sb.exec("sync", "/workspace", timeout=60)
             result = process.wait()
             if result != 0:
