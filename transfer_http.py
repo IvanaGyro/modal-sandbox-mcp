@@ -154,7 +154,8 @@ def _cleanup_exports() -> int:
 
 
 def create_download_link(
-    sandbox_id: str, path: str, expires_in_seconds: int = DEFAULT_EXPIRES_SECONDS
+    sandbox_id: str, path: str, expires_in_seconds: int = DEFAULT_EXPIRES_SECONDS,
+    archive_directory: bool = False,
 ) -> dict:
     """Copy a Sandbox file to a persistent staging Volume and sign a GET URL."""
     path = safe_path(path)
@@ -166,12 +167,61 @@ def create_download_link(
     file_id = secrets.token_hex(16)
     stage = EXPORT_DIR / (file_id + ".bin")
     sb = modal.Sandbox.from_id(sandbox_id)
+    archive_in_sandbox = None
     try:
         info = sb.filesystem.stat(path)
-        if int(info.size) > MAX_TRANSFER_BYTES:
-            raise ValueError("Export exceeds 256 MiB; split or compress the file")
-        sb.filesystem.copy_to_local(path, stage)
+        is_directory = "directory" in str(info.type).lower()
+        if archive_directory != is_directory:
+            raise ValueError(
+                "Path is a directory; use create_directory_download_link"
+                if is_directory else
+                "Path is a file; use create_download_link"
+            )
+        if not is_directory:
+            if int(info.size) > MAX_TRANSFER_BYTES:
+                raise ValueError("Export exceeds 256 MiB")
+            sb.filesystem.copy_to_local(path, stage)
+        else:
+            if path in ("/", "/tmp", "/workspace", "/etc", "/usr", "/var"):
+                raise ValueError("Archive a specific subdirectory, not a system root")
+            archive_in_sandbox = "/tmp/mcp-export-" + file_id + ".zip"
+            archive_script = """
+import os, sys, zipfile
+root, output = sys.argv[1:3]
+if not os.path.isdir(root):
+    raise RuntimeError("Not a directory")
+base = os.path.basename(root.rstrip("/"))
+total = 0
+with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED,
+                     compresslevel=1, allowZip64=True) as archive:
+    for directory, subdirs, files in os.walk(root, followlinks=False):
+        subdirs[:] = [d for d in subdirs
+                      if not os.path.islink(os.path.join(directory, d))]
+        for name in files:
+            item = os.path.join(directory, name)
+            if os.path.islink(item):
+                continue
+            total += os.stat(item).st_size
+            if total > 512 * 1024 * 1024:
+                raise RuntimeError("Archive source exceeds 512 MiB")
+            rel = os.path.relpath(item, root)
+            archive.write(item, os.path.join(base, rel))
+"""
+            process = sb.exec(
+                "python", "-c", archive_script, path, archive_in_sandbox,
+                timeout=120,
+            )
+            stdout = process.stdout.read()
+            stderr = process.stderr.read()
+            if process.wait() != 0:
+                raise RuntimeError("Directory archive failed: " + stderr[:500])
+            sb.filesystem.copy_to_local(archive_in_sandbox, stage)
     finally:
+        if archive_in_sandbox:
+            try:
+                sb.filesystem.remove(archive_in_sandbox)
+            except Exception:
+                pass
         sb.detach()
 
     try:
@@ -181,7 +231,7 @@ def create_download_link(
         with open(stage, "rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         TRANSFER_VOLUME.commit()
-        basename = PurePosixPath(path).name or "download.bin"
+        basename = (PurePosixPath(path).name + ".zip") if archive_directory else (PurePosixPath(path).name or "download.bin")
         token = make_token({
             "op": "download", "id": file_id, "exp": expires,
             "name": basename, "bytes": size, "sha256": digest,
@@ -192,6 +242,7 @@ def create_download_link(
             "size_bytes": size,
             "sha256": digest,
             "expires_at_unix": expires,
+            "archive_directory": archive_directory,
         }
     except Exception:
         stage.unlink(missing_ok=True)
