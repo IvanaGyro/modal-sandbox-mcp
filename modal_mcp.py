@@ -10,6 +10,10 @@ import os
 import modal
 from typing import Literal
 from sandbox_images import resolve_sandbox_image
+from sandbox_lifecycle import (
+    DEFAULT_LIFETIME_SECONDS, idle_budget_for, managed_tags,
+    restored_settings, delete_exit_snapshot_of,
+)
 from path_reader import inspect_path
 from oauth_support import AUTH_VOLUME, github_oauth, require_authorized_owner
 from transfer_http import (
@@ -26,7 +30,7 @@ app = modal.App(APP_NAME)
 # arbitrary user commands in the control-plane container.
 web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastmcp>=3.4,<3.5", "pydantic>=2,<3"
-).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http").add_local_python_source("sandbox_images").add_local_python_source("path_reader")
+).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http").add_local_python_source("sandbox_images").add_local_python_source("path_reader").add_local_python_source("sandbox_lifecycle")
 sandbox_image = modal.Image.debian_slim(python_version="3.12").apt_install(
     "bash", "git", "curl", "ca-certificates", "build-essential"
 )
@@ -130,8 +134,7 @@ def mcp_web():
 
     @mcp.tool
     def create_sandbox(
-        lifetime_seconds: int = 1800,
-        idle_seconds: int = 300,
+        lifetime_seconds: int = DEFAULT_LIFETIME_SECONDS,
         cpu: float = 1.0,
         memory_mib: int = 1024,
         persistent_workspace: bool = False,
@@ -149,17 +152,14 @@ def mcp_web():
         image_source="modal_id": an existing Modal Image ID (im-...).
         Custom images need a POSIX /bin/sh and 'sleep' for their keepalive;
         read_file also requires 'python'. Image selection does NOT allocate GPU.
+        Exit Snapshot is enabled by default. Idle timeout is calculated for
+        each Sandbox based on a budget equal to 2 CPU-core-hours of Modal
+        Sandbox compute (currently USD 0.283824), accounting for reserved
+        CPU and RAM. The idle budget is not a total spending limit.
         Resource requests and image builds incur Modal charges.
         """
         require_authorized_owner()
-        if not 60 <= lifetime_seconds <= 3600:
-            raise ValueError("lifetime_seconds must be 60–3600")
-        if not 30 <= idle_seconds <= lifetime_seconds:
-            raise ValueError("idle_seconds must be 30–lifetime_seconds")
-        if not 0.125 <= cpu <= 2:
-            raise ValueError("cpu must be 0.125–2 cores")
-        if not 128 <= memory_mib <= 4096:
-            raise ValueError("memory_mib must be 128–4096")
+        idle_policy = idle_budget_for(cpu, memory_mib, lifetime_seconds)
         selected_image, image_meta = resolve_sandbox_image(
             modal, sandbox_image, image_ref, image_source, image_add_python
         )
@@ -171,18 +171,21 @@ def mcp_web():
             app=app,
             image=selected_image,
             timeout=lifetime_seconds,
-            idle_timeout=idle_seconds,
+            idle_timeout=idle_policy["idle_seconds"],
             cpu=cpu,
             memory=memory_mib,
             workdir="/workspace" if persistent_workspace else "/tmp",
             volumes={"/workspace": WORKSPACE_VOLUME} if persistent_workspace else {},
-            tags={"mcp_persistent_workspace": "1" if persistent_workspace else "0"},
+            tags=managed_tags(cpu, memory_mib, lifetime_seconds, persistent_workspace),
+            experimental_options={"enable_exit_snapshot": True},
         )
         try:
             return {
                 "sandbox_id": sb.object_id,
                 "status": "created",
                 "lifetime_seconds": lifetime_seconds,
+                "exit_snapshot_enabled": True,
+                "idle_policy": idle_policy,
                 "persistent_workspace": persistent_workspace,
                 "workspace_path": "/workspace" if persistent_workspace else None,
                 **image_meta,
@@ -283,12 +286,75 @@ def mcp_web():
 
     @mcp.tool
     def terminate_sandbox(sandbox_id: str) -> dict:
-        """Terminate a sandbox to stop its compute usage."""
+        """Stop this Sandbox and delete its Exit Snapshot when available.
+
+        Modal automatically creates an Exit Snapshot even on terminate().
+        Wait for the snapshot, then call experimental.image_delete to discard
+        it. On errors, report not_deleted instead of claiming cleanup.
+        """
         require_authorized_owner()
         sb = _get_sandbox(sandbox_id)
         try:
-            sb.terminate()
-            return {"sandbox_id": sandbox_id, "terminated": True}
+            tags = sb.get_tags()
+            sb.terminate(wait=True)
+            if tags.get("mcp_exit_snapshot") != "1":
+                snapshot = {"status": "not_enabled", "deleted": False}
+            else:
+                snapshot = delete_exit_snapshot_of(sb, modal, timeout_seconds=45)
+            return {
+                "sandbox_id": sandbox_id,
+                "terminated": True,
+                "exit_snapshot": snapshot,
+            }
+        finally:
+            sb.detach()
+
+    @mcp.tool
+    def resume_sandbox(sandbox_id: str) -> dict:
+        """Restore a Sandbox after an idle/lifetime timeout using Exit Snapshot.
+
+        Returns a NEW sandbox_id; running processes are not resumed. This
+        cannot restore manually terminated Sandboxes whose snapshot was
+        successfully deleted. Snapshot retrieval may fail (Beta feature).
+        """
+        require_authorized_owner()
+        previous = _get_sandbox(sandbox_id)
+        try:
+            if previous.poll() is None:
+                raise ValueError("Sandbox is still running; no Exit Snapshot exists yet")
+            tags = previous.get_tags()
+            cpu, memory_mib, lifetime_seconds, persistent = restored_settings(tags)
+            snapshot_image = previous._experimental_get_exit_snapshot(timeout=45)
+        finally:
+            previous.detach()
+
+        idle_policy = idle_budget_for(cpu, memory_mib, lifetime_seconds)
+        sb = modal.Sandbox.create(
+            "sh", "-c", "while :; do sleep 3600; done",
+            app=app,
+            image=snapshot_image,
+            timeout=lifetime_seconds,
+            idle_timeout=idle_policy["idle_seconds"],
+            cpu=cpu,
+            memory=memory_mib,
+            workdir="/workspace" if persistent else "/tmp",
+            volumes={"/workspace": WORKSPACE_VOLUME} if persistent else {},
+            tags=managed_tags(cpu, memory_mib, lifetime_seconds, persistent),
+            experimental_options={"enable_exit_snapshot": True},
+        )
+        try:
+            return {
+                "sandbox_id": sb.object_id,
+                "restored_from_sandbox_id": sandbox_id,
+                "source_snapshot_image_id": snapshot_image.object_id,
+                "status": "created",
+                "exit_snapshot_enabled": True,
+                "idle_policy": idle_policy,
+                "lifetime_seconds": lifetime_seconds,
+                "persistent_workspace": persistent,
+                "workspace_path": "/workspace" if persistent else None,
+                "processes_restored": False,
+            }
         finally:
             sb.detach()
 
