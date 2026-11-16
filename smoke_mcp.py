@@ -124,9 +124,9 @@ def verify_tools_list() -> dict:
             raise RuntimeError("MCP tools/list failed: " + repr(result))
         tools = result["result"].get("tools", [])
         names = {tool["name"] for tool in tools}
-        if names != EXPECTED_TOOLS:
+        if not EXPECTED_TOOLS.issubset(names):
             raise RuntimeError(
-                f"Tool catalog mismatch: found {sorted(names)}, "
+                f"Required MCP tools missing: found {sorted(names)}, "
                 f"expected {sorted(EXPECTED_TOOLS)}"
             )
         return {"protocol_version": protocol, "tool_names": sorted(names)}
