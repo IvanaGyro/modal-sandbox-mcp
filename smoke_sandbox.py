@@ -71,11 +71,14 @@ def run_e2e() -> dict:
 
         try:
             created = invoke("create_sandbox", {
-                "lifetime_seconds": 300, "idle_seconds": 90,
+                "lifetime_seconds": 300,
                 "cpu": 0.125, "memory_mib": 256,
             })
             sandbox_id = created["sandbox_id"]
-            print("create_sandbox: OK (5-minute hard lifetime, 90s idle)")
+            assert created["exit_snapshot_enabled"] is True
+            assert created["idle_policy"]["idle_seconds"] == 300
+            assert created["idle_policy"]["idle_capped_by_lifetime"] is True
+            print("create_sandbox: OK (5-minute hard lifetime, budget-based idle)")
             executed = invoke("exec_command", {
                 "sandbox_id": sandbox_id, "command": "printf 'MCP_SHELL_OK\\n'",
                 "timeout_seconds": 15,
