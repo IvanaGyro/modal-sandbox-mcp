@@ -1,0 +1,28 @@
+name: Deploy to Modal
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: modal-production-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify credentials exist
+        run: |
+          test -n "$MODAL_TOKEN_ID" || (echo 'MODAL_TOKEN_ID is missing' >&2; exit 1)
+          test -n "$MODAL_TOKEN_SECRET" || (echo 'MODAL_TOKEN_SECRET is missing' >&2; exit 1)
+      - name: Install Modal SDK
+        run: python -m pip install 'modal>=1.6,<2'
+      - name: Deploy MCP control plane
+        run: modal deploy modal_mcp.py
