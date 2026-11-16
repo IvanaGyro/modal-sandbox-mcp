@@ -29,6 +29,28 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(read_record("sb-ABC123", directory=directory)["status"],
                              "deleted")
 
+    def test_terminate_after_delete_preserves_tombstone(self):
+        # Simulate terminate -> delete_snapshot -> terminate with the same ID.
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            sandbox_id = "sb-ABC123"
+            write_record(sandbox_id, directory=directory, status="ready",
+                         image_id="im-snap", stopped_at="2026-11-17T00:00:00Z")
+            write_record(sandbox_id, directory=directory, status="deleted",
+                         image_id="im-snap", deleted_at="2026-11-17T00:01:00Z")
+            for observed_status in ("ready", "pending", "unavailable"):
+                with self.subTest(observed_status=observed_status):
+                    latest = write_record(
+                        sandbox_id, directory=directory, status=observed_status,
+                        image_id=None, stopped_at="2026-11-17T00:02:00Z",
+                    )
+                    self.assertEqual(latest["status"], "deleted")
+                    self.assertEqual(latest["image_id"], "im-snap")
+                    self.assertEqual(
+                        read_record(sandbox_id, directory=directory)["deleted_at"],
+                        "2026-11-17T00:01:00Z",
+                    )
+
     def test_reject_path_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
             for bad_id in ("../hack", "sb-../../hack", "im-snapshot", "sb-??"):

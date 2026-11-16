@@ -117,6 +117,15 @@ def verify():
             # Explicit deletion is a separate operation, and is idempotent.
             deleted = call("delete_snapshot", {"sandbox_id": resumed_id})
             assert deleted["deleted"] is True and deleted["status"] == "deleted", deleted
+            # Regression: the old code resurrected the inventory entry when
+            # terminate_sandbox was invoked again after explicit deletion.
+            stopped_again = call("terminate_sandbox", {"sandbox_id": resumed_id})
+            assert stopped_again["terminated"] is True, stopped_again
+            assert stopped_again["snapshot_deleted"] is True, stopped_again
+            assert stopped_again["exit_snapshot"]["status"] == "deleted", stopped_again
+            after_delete = call("list_snapshots", {})
+            assert all(item["sandbox_id"] != resumed_id
+                       for item in after_delete["snapshots"]), after_delete
             again = call("delete_snapshot", {"sandbox_id": resumed_id})
             assert again["status"] == "already_deleted", again
 

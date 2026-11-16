@@ -316,25 +316,44 @@ def mcp_web():
         sb = _get_sandbox(sandbox_id)
         try:
             tags = sb.get_tags()
-            sb.terminate(wait=True)
+            # A second terminate call is valid after the Sandbox has exited.
+            # Avoid asking Modal to terminate an already stopped Sandbox.
+            if sb.poll() is None:
+                sb.terminate(wait=True)
             if tags.get("mcp_exit_snapshot") == "1":
-                snapshot = inspect_exit_snapshot(sb, timeout_seconds=45)
-                if tags.get("mcp_managed") == "1":
-                    try:
-                        write_record(
-                            sandbox_id, status=snapshot["status"],
-                            image_id=snapshot.get("image_id"), stopped_at=utc_now(),
-                        )
-                        SNAPSHOT_VOLUME.commit()
-                    except Exception as exc:
-                        snapshot["inventory_error"] = type(exc).__name__
+                # Never inspect/re-register a Snapshot that this MCP explicitly
+                # deleted; its inventory tombstone is authoritative.
+                record = read_record(sandbox_id)
+                if record and record.get("status") == "deleted":
+                    snapshot = {
+                        "status": "deleted", "image_id": record.get("image_id"),
+                    }
+                else:
+                    snapshot = inspect_exit_snapshot(sb, timeout_seconds=45)
+                    if tags.get("mcp_managed") == "1":
+                        try:
+                            latest = write_record(
+                                sandbox_id, status=snapshot["status"],
+                                image_id=snapshot.get("image_id"),
+                                stopped_at=utc_now(),
+                            )
+                            SNAPSHOT_VOLUME.commit()
+                            # A concurrent delete_snapshot may have completed
+                            # while the Modal snapshot lookup was in progress.
+                            if latest["status"] == "deleted":
+                                snapshot = {
+                                    "status": "deleted",
+                                    "image_id": latest.get("image_id"),
+                                }
+                        except Exception as exc:
+                            snapshot["inventory_error"] = type(exc).__name__
             else:
                 snapshot = {"status": "not_enabled", "image_id": None}
             return {
                 "sandbox_id": sandbox_id,
                 "terminated": True,
                 "exit_snapshot": snapshot,
-                "snapshot_deleted": False,
+                "snapshot_deleted": snapshot["status"] == "deleted",
             }
         finally:
             sb.detach()
@@ -414,6 +433,12 @@ def mcp_web():
                 if latest.get("status") == "deleted":
                     continue
                 changes = True
+            # The initial listing may predate an explicit deletion. Recheck
+            # the tombstone even when Modal reported the same state, because
+            # that case does not pass through guarded write_record().
+            current = read_record(sandbox_id)
+            if current and current.get("status") == "deleted":
+                continue
             snapshots.append({
                 "sandbox_id": sandbox_id,
                 "status": snapshot["status"],
