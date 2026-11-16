@@ -1,0 +1,33 @@
+name: 100 MiB Signed HTTPS Transfer
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/transfer-100mb.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modal-transfer-100mb-test
+  cancel-in-progress: false
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify syntax
+        run: python -m compileall -q smoke_transfer_100mb.py
+      - run: python -m pip install 'modal>=1.6,<2'
+      - name: Test 100 MiB upload and download across live Modal MCP
+        run: modal run smoke_transfer_100mb.py
