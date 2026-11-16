@@ -80,7 +80,7 @@ def main_test():
 
         try:
             created = invoke("create_sandbox", {
-                "lifetime_seconds": 900, "idle_seconds": 600,
+                "lifetime_seconds": 900,
                 "cpu": 1.0, "memory_mib": 1024,
                 "persistent_workspace": True,
             })
@@ -194,7 +194,7 @@ def main_test():
             secondary_id = None
             try:
                 secondary = invoke("create_sandbox", {
-                    "lifetime_seconds": 300, "idle_seconds": 180,
+                    "lifetime_seconds": 300,
                     "cpu": 0.125, "memory_mib": 256,
                     "persistent_workspace": True,
                 })
