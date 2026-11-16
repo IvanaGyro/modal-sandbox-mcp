@@ -11,10 +11,15 @@ class ProjectTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tree = ast.parse((ROOT / "modal_mcp.py").read_text(encoding="utf-8"))
 
-    def test_six_tools_declared(self):
+    def test_core_tools_declared(self):
         nested = [n.name for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef)]
-        for name in ("create_sandbox", "exec_command", "read_file", "write_file", "sandbox_status", "terminate_sandbox"):
+        for name in ("create_sandbox", "exec_command", "read_path", "write_file", "sandbox_status", "terminate_sandbox"):
             self.assertIn(name, nested)
+
+    def test_legacy_read_tools_are_removed(self):
+        nested = [n.name for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef)]
+        for old in ("read_file", "create_download_link", "create_directory_download_link"):
+            self.assertNotIn(old, nested)
 
     def test_authentication_fail_closed(self):
         src = (ROOT / "modal_mcp.py").read_text()
