@@ -16,6 +16,10 @@ from sandbox_lifecycle import (
     restored_settings, delete_exit_snapshot_of,
 )
 from path_reader import inspect_path
+from snapshot_inventory import (
+    inspect_exit_snapshot, list_records, write_record, utc_now,
+    read_record,
+)
 from oauth_support import AUTH_VOLUME, github_oauth, require_authorized_owner
 from transfer_http import (
     TRANSFER_VOLUME, WORKSPACE_VOLUME, install_transfer_routes,
@@ -26,12 +30,15 @@ from transfer_http import (
 
 APP_NAME = "modal-sandbox-mcp"
 app = modal.App(APP_NAME)
+SNAPSHOT_VOLUME = modal.Volume.from_name(
+    "modal-sandbox-mcp-snapshot-index", create_if_missing=True
+)
 
 # The web app and the sandbox use separate images. A web request never executes
 # arbitrary user commands in the control-plane container.
 web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastmcp>=3.4,<3.5", "pydantic>=2,<3"
-).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http").add_local_python_source("sandbox_images").add_local_python_source("path_reader").add_local_python_source("sandbox_lifecycle")
+).add_local_python_source("oauth_support").add_local_python_source("passphrase_oauth").add_local_python_source("transfer_http").add_local_python_source("sandbox_images").add_local_python_source("path_reader").add_local_python_source("sandbox_lifecycle").add_local_python_source("snapshot_inventory")
 sandbox_image = modal.Image.debian_slim(python_version="3.12").apt_install(
     "bash", "git", "curl", "ca-certificates", "build-essential"
 )
@@ -113,7 +120,11 @@ def cleanup_transfer_cache():
     secrets=[modal.Secret.from_name("modal-mcp-auth")],
     timeout=180,
     max_containers=1,
-    volumes={"/oauth-state": AUTH_VOLUME, "/transfer-staging": TRANSFER_VOLUME},
+    volumes={
+        "/oauth-state": AUTH_VOLUME,
+        "/transfer-staging": TRANSFER_VOLUME,
+        "/snapshot-index": SNAPSHOT_VOLUME,
+    },
 )
 @modal.concurrent(max_inputs=8)
 @modal.asgi_app()
@@ -181,9 +192,18 @@ def mcp_web():
             experimental_options={"enable_exit_snapshot": True},
         )
         try:
+            try:
+                write_record(sb.object_id, status="running")
+                SNAPSHOT_VOLUME.commit()
+                index_status = "recorded"
+            except Exception as exc:
+                # Return the Sandbox ID even if inventory storage fails; never
+                # leave a running, billed Sandbox invisible to the caller.
+                index_status = "failed:" + type(exc).__name__
             return {
                 "sandbox_id": sb.object_id,
                 "status": "created",
+                "inventory_status": index_status,
                 "lifetime_seconds": lifetime_seconds,
                 "exit_snapshot_enabled": True,
                 "idle_policy": idle_policy,
@@ -287,28 +307,129 @@ def mcp_web():
 
     @mcp.tool
     def terminate_sandbox(sandbox_id: str) -> dict:
-        """Stop this Sandbox and delete its Exit Snapshot when available.
+        """Stop the Sandbox and KEEP its automatic Exit Snapshot.
 
-        Modal automatically creates an Exit Snapshot even on terminate().
-        Wait for the snapshot, then call experimental.image_delete to discard
-        it. On errors, report not_deleted instead of claiming cleanup.
+        The filesystem snapshot is retained by Modal for approximately 30
+        days. Call delete_snapshot separately if you want to discard it.
         """
         require_authorized_owner()
         sb = _get_sandbox(sandbox_id)
         try:
             tags = sb.get_tags()
             sb.terminate(wait=True)
-            if tags.get("mcp_exit_snapshot") != "1":
-                snapshot = {"status": "not_enabled", "deleted": False}
+            if tags.get("mcp_exit_snapshot") == "1":
+                snapshot = inspect_exit_snapshot(sb, timeout_seconds=45)
+                if tags.get("mcp_managed") == "1":
+                    try:
+                        write_record(
+                            sandbox_id, status=snapshot["status"],
+                            image_id=snapshot.get("image_id"), stopped_at=utc_now(),
+                        )
+                        SNAPSHOT_VOLUME.commit()
+                    except Exception as exc:
+                        snapshot["inventory_error"] = type(exc).__name__
             else:
-                snapshot = delete_exit_snapshot_of(sb, modal, timeout_seconds=45, snapshot_enabled=True)
+                snapshot = {"status": "not_enabled", "image_id": None}
             return {
                 "sandbox_id": sandbox_id,
                 "terminated": True,
                 "exit_snapshot": snapshot,
+                "snapshot_deleted": False,
             }
         finally:
             sb.detach()
+
+    @mcp.tool
+    def delete_snapshot(sandbox_id: str) -> dict:
+        """Explicitly and permanently delete a stopped MCP Sandbox Exit Snapshot.
+
+        The input is the ORIGINAL Sandbox ID, not an Image ID. Active Sandbox
+        filesystem snapshots and base Images are never deleted.
+        """
+        require_authorized_owner()
+        record = read_record(sandbox_id)
+        if record and record.get("status") == "deleted":
+            return {"sandbox_id": sandbox_id, "status": "already_deleted", "deleted": True}
+        sb = _get_sandbox(sandbox_id)
+        try:
+            restored_settings(sb.get_tags())  # Do not delete snapshots of foreign Sandboxes.
+            if sb.poll() is None:
+                raise ValueError("Sandbox is still running; terminate it before deleting its Exit Snapshot")
+            result = delete_exit_snapshot_of(
+                sb, modal, timeout_seconds=45, snapshot_enabled=True,
+            )
+            if result["deleted"]:
+                try:
+                    write_record(
+                        sandbox_id, status="deleted",
+                        image_id=result["image_id"], deleted_at=utc_now(),
+                    )
+                    SNAPSHOT_VOLUME.commit()
+                except Exception as exc:
+                    result["inventory_error"] = type(exc).__name__
+            return {"sandbox_id": sandbox_id, **result}
+        finally:
+            sb.detach()
+
+    @mcp.tool
+    def list_snapshots(offset: int = 0, limit: int = 50) -> dict:
+        """List indexed Exit Snapshots from this MCP (not arbitrary Modal Images).
+
+        Running Sandboxes and explicitly deleted snapshots are omitted.
+        Older Sandboxes created before the persistent index was introduced
+        are not discoverable by this listing, but their IDs still work with
+        resume_sandbox and delete_snapshot.
+        """
+        require_authorized_owner()
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("offset must be >= 0 and limit must be 1..100")
+        records = list_records()
+        selected = records[offset:offset + limit]
+        snapshots = []
+        changes = False
+        for record in selected:
+            if record.get("status") == "deleted":
+                continue
+            sandbox_id = record["sandbox_id"]
+            sb = None
+            try:
+                sb = _get_sandbox(sandbox_id)
+                snapshot = inspect_exit_snapshot(sb, timeout_seconds=0)
+            except Exception as exc:
+                snapshot = {
+                    "status": "unavailable", "image_id": None,
+                    "error_type": type(exc).__name__,
+                }
+            finally:
+                if sb is not None:
+                    sb.detach()
+            if snapshot["status"] == "running":
+                continue
+            if (record.get("status") != snapshot["status"]
+                    or record.get("image_id") != snapshot.get("image_id")):
+                write_record(
+                    sandbox_id, status=snapshot["status"],
+                    image_id=snapshot.get("image_id"),
+                )
+                changes = True
+            snapshots.append({
+                "sandbox_id": sandbox_id,
+                "status": snapshot["status"],
+                "image_id": snapshot.get("image_id"),
+                "registered_at": record["registered_at"],
+                **({"error_type": snapshot["error_type"]}
+                   if "error_type" in snapshot else {}),
+            })
+        if changes:
+            SNAPSHOT_VOLUME.commit()
+        return {
+            "snapshots": snapshots,
+            "offset": offset,
+            "next_offset": offset + limit if offset + limit < len(records) else None,
+            "indexed_sandboxes": len(records),
+            "retention_days": 30,
+            "scope": "MCP-indexed Sandboxes only; excludes pre-index records",
+        }
 
     @mcp.tool
     def resume_sandbox(sandbox_id: str) -> dict:
@@ -326,6 +447,15 @@ def mcp_web():
             tags = previous.get_tags()
             cpu, memory_mib, lifetime_seconds, persistent = restored_settings(tags)
             snapshot_image = previous._experimental_get_exit_snapshot(timeout=45)
+            # A restored Sandbox does not consume/delete the source snapshot.
+            try:
+                write_record(
+                    sandbox_id, status="ready",
+                    image_id=snapshot_image.object_id,
+                )
+                SNAPSHOT_VOLUME.commit()
+            except Exception:
+                pass  # Resume must not be blocked by an advisory inventory.
         finally:
             previous.detach()
 
@@ -344,8 +474,15 @@ def mcp_web():
             experimental_options={"enable_exit_snapshot": True},
         )
         try:
+            try:
+                write_record(sb.object_id, status="running")
+                SNAPSHOT_VOLUME.commit()
+                index_status = "recorded"
+            except Exception as exc:
+                index_status = "failed:" + type(exc).__name__
             return {
                 "sandbox_id": sb.object_id,
+                "inventory_status": index_status,
                 "restored_from_sandbox_id": sandbox_id,
                 "source_snapshot_image_id": snapshot_image.object_id,
                 "status": "created",
