@@ -10,7 +10,9 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 import uuid
+_INDEX_LOCK = threading.RLock()
 
 INDEX_DIR = Path("/snapshot-index/records")
 _VALID_ID = re.compile(r"^sb-[A-Za-z0-9_-]{3,150}$")
@@ -38,21 +40,25 @@ def read_record(sandbox_id: str, *, directory: Path = INDEX_DIR) -> dict | None:
 
 def write_record(sandbox_id: str, *, directory: Path = INDEX_DIR, **changes) -> dict:
     path = _record_path(sandbox_id, directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    record = read_record(sandbox_id, directory=directory) or {
-        "sandbox_id": sandbox_id,
-        "registered_at": utc_now(),
-    }
-    record.update(changes)
-    record["updated_at"] = utc_now()
-    # Write a complete JSON record before replacing the old version.
-    temporary = directory / (path.name + "." + uuid.uuid4().hex + ".tmp")
-    try:
-        temporary.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return record
+    with _INDEX_LOCK:
+        directory.mkdir(parents=True, exist_ok=True)
+        record = read_record(sandbox_id, directory=directory) or {
+            "sandbox_id": sandbox_id,
+            "registered_at": utc_now(),
+        }
+        # A successful explicit deletion is final, even if a concurrent
+        # list_snapshots call had already begun refreshing this record.
+        if record.get("status") == "deleted" and changes.get("status") != "deleted":
+            return record
+        record.update(changes)
+        record["updated_at"] = utc_now()
+        temporary = directory / (path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            temporary.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return record
 
 
 def list_records(*, directory: Path = INDEX_DIR) -> list[dict]:

@@ -18,6 +18,17 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(record["image_id"], "im-snap")
             self.assertEqual(len(list_records(directory=directory)), 1)
 
+    def test_deleted_record_cannot_be_revived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            write_record("sb-ABC123", directory=directory, status="deleted",
+                         image_id="im-removed")
+            updated = write_record("sb-ABC123", directory=directory,
+                                   status="ready", image_id="im-removed")
+            self.assertEqual(updated["status"], "deleted")
+            self.assertEqual(read_record("sb-ABC123", directory=directory)["status"],
+                             "deleted")
+
     def test_reject_path_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
             for bad_id in ("../hack", "sb-../../hack", "im-snapshot", "sb-??"):

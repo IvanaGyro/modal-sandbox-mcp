@@ -407,10 +407,12 @@ def mcp_web():
                 continue
             if (record.get("status") != snapshot["status"]
                     or record.get("image_id") != snapshot.get("image_id")):
-                write_record(
+                latest = write_record(
                     sandbox_id, status=snapshot["status"],
                     image_id=snapshot.get("image_id"),
                 )
+                if latest.get("status") == "deleted":
+                    continue
                 changes = True
             snapshots.append({
                 "sandbox_id": sandbox_id,
