@@ -33,7 +33,7 @@ def verify_tools_list() -> dict:
     import httpx
 
     auth_mode = os.getenv("MCP_AUTH_MODE")
-    if auth_mode == "github":
+    if auth_mode in ("github", "passphrase"):
         # Full token exchange requires interactive GitHub user consent.
         # Confirm public OAuth metadata and reject anonymous MCP calls.
         origin = ENDPOINT.removesuffix("/mcp")
@@ -136,7 +136,7 @@ def verify_tools_list() -> dict:
 def main():
     result = verify_tools_list.remote()
     if result.get("mode") == "github":
-        print("GitHub OAuth discovery and anonymous-denial checks passed")
+        print("OAuth discovery and anonymous-denial checks passed")
     else:
         print(f"Authenticated MCP handshake OK: {result['protocol_version']}")
         print("MCP tools/list OK:")
