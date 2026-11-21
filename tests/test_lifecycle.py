@@ -37,15 +37,34 @@ class IdlePricingTests(unittest.TestCase):
         self.assertEqual(policy["idle_seconds"], 90)
         self.assertTrue(policy["idle_capped_by_lifetime"])
 
-    def test_invalid_resource_limits_rejected(self):
-        for cpu, memory, seconds in (
-            (0, 1024, 300), (3, 1024, 300),
-            (1, 127, 300), (1, 8192, 300),
-            (1, 1024, 59), (1, 1024, 86401),
+    def test_cpu_and_ram_ranges_are_not_enforced_by_mcp(self):
+        # The Modal API, not this helper, validates CPU and memory requests.
+        # Test both sides of the previous 0.125-2 CPU / 128-4096 MiB ranges.
+        for cpu, memory in (
+            (0.0625, 64), (4, 8192), (8, 16384),
+            (0, 1024), (1, 0),
         ):
-            with self.subTest(cpu=cpu, memory=memory, seconds=seconds):
+            with self.subTest(cpu=cpu, memory=memory):
+                policy = idle_budget_for(cpu, memory, 86400)
+                self.assertGreaterEqual(policy["idle_seconds"], 1)
+                self.assertLessEqual(policy["idle_seconds"], 86400)
+                self.assertEqual(policy["reserved_cpu_cores"], cpu)
+                self.assertEqual(policy["reserved_memory_mib"], memory)
+
+    def test_unpriceable_request_does_not_preempt_modal_validation(self):
+        # Avoid local arithmetic errors when the platform must reject inputs.
+        for cpu, memory in ((0, 0), (-1, -1024), (float("nan"), 1024)):
+            with self.subTest(cpu=cpu, memory=memory):
+                policy = idle_budget_for(cpu, memory, 300)
+                self.assertEqual(policy["idle_seconds"], 300)
+                self.assertIsNone(policy["calculated_idle_seconds"])
+                self.assertIsNone(policy["estimated_idle_cost_usd"])
+
+    def test_invalid_lifetime_still_rejected(self):
+        for seconds in (59, 86401):
+            with self.subTest(seconds=seconds):
                 with self.assertRaises(ValueError):
-                    idle_budget_for(cpu, memory, seconds)
+                    idle_budget_for(1, 1024, seconds)
 
 
 class ExitSnapshotTests(unittest.TestCase):
@@ -53,6 +72,10 @@ class ExitSnapshotTests(unittest.TestCase):
         tags = managed_tags(0.5, 512, 14400, True)
         self.assertEqual(tags["mcp_exit_snapshot"], "1")
         self.assertEqual(restored_settings(tags), (0.5, 512, 14400, True))
+
+    def test_high_resource_tags_round_trip(self):
+        tags = managed_tags(4, 8192, 14400, False)
+        self.assertEqual(restored_settings(tags), (4, 8192, 14400, False))
 
     def test_foreign_sandbox_cannot_resume(self):
         with self.assertRaises(ValueError):
