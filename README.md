@@ -288,8 +288,17 @@ not private to one session. Changes to identical filenames from concurrent
 Sandboxes can conflict. The workspace survives Sandbox termination; `/tmp`
 does not.
 
-Sandbox lifetime is at most 24 hours, with 0.125–2 CPU cores and
-128 MiB–4 GiB RAM. Pricing is budget-derived for idle time, not a spend cap.
+Sandbox lifetime is at most 24 hours (60–86400 seconds). The MCP does
+**not** enforce its own CPU or RAM ranges: `cpu` and `memory_mib` are
+forwarded unchanged to Modal, whose SDK and platform determine which
+resource requests are valid or available. For example,
+`create_sandbox(cpu=4, memory_mib=8192)` requests 4 physical CPU cores
+(approximately 8 vCPUs) and 8 GiB RAM, subject to Modal acceptance.
+
+Requested CPU/RAM still determine the automatic cost-based idle timeout.
+For an unpriceable resource request (such as zero total resource cost),
+the MCP uses the requested lifetime as an idle-time fallback and lets
+Modal report the resource error. Pricing is an estimate, not a spend cap.
 Sandboxes and Modal Volume storage may consume paid resources.
 **Terminate Sandboxes explicitly when finished.**
 
