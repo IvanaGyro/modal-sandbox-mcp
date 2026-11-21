@@ -24,10 +24,6 @@ def idle_budget_for(cpu: float, memory_mib: int, lifetime_seconds: int) -> dict:
     Returns both raw budget-derived timeout and effective timeout capped by
     the Sandbox lifetime; this is a *cost estimate*, not a spend hard limit.
     """
-    if not 0.125 <= cpu <= 2:
-        raise ValueError("cpu must be 0.125–2 physical cores")
-    if not 128 <= memory_mib <= 4096:
-        raise ValueError("memory_mib must be 128–4096")
     if not 60 <= lifetime_seconds <= MAX_LIFETIME_SECONDS:
         raise ValueError("lifetime_seconds must be 60–86400")
 
@@ -35,23 +31,32 @@ def idle_budget_for(cpu: float, memory_mib: int, lifetime_seconds: int) -> dict:
     memory_rate = (Decimal(memory_mib) / Decimal(1024)) * MEMORY_GIB_USD_PER_SECOND
     total_rate = cpu_rate + memory_rate
 
-    calculated_seconds = int(
-        (IDLE_BUDGET_USD / total_rate).to_integral_value(rounding=ROUND_FLOOR)
-    )
-    effective_seconds = min(calculated_seconds, lifetime_seconds)
-    estimated_idle_usd = total_rate * Decimal(effective_seconds)
+    # Resource validity belongs to Modal, not the MCP. Keep this cost
+    # calculation safe even when Modal will reject a resource request.
+    if total_rate.is_finite() and total_rate > 0:
+        calculated_seconds = max(1, int(
+            (IDLE_BUDGET_USD / total_rate).to_integral_value(rounding=ROUND_FLOOR)
+        ))
+        effective_seconds = min(calculated_seconds, lifetime_seconds)
+        estimated_idle_usd = float(total_rate * Decimal(effective_seconds))
+    else:
+        # Let modal.Sandbox.create report invalid CPU/RAM requests itself.
+        calculated_seconds = None
+        effective_seconds = lifetime_seconds
+        estimated_idle_usd = None
     return {
         "idle_seconds": effective_seconds,
         "calculated_idle_seconds": calculated_seconds,
-        "idle_capped_by_lifetime": effective_seconds < calculated_seconds,
+        "idle_capped_by_lifetime": (calculated_seconds is not None and
+                                    effective_seconds < calculated_seconds),
         "idle_budget_usd": float(IDLE_BUDGET_USD),
         "idle_budget_basis": "2 hours of 1 Modal Sandbox CPU core (CPU-only)",
         "reserved_cpu_cores": cpu,
         "reserved_memory_mib": memory_mib,
-        "estimated_cpu_usd_per_second": float(cpu_rate),
-        "estimated_memory_usd_per_second": float(memory_rate),
-        "estimated_total_usd_per_second": float(total_rate),
-        "estimated_idle_cost_usd": float(estimated_idle_usd),
+        "estimated_cpu_usd_per_second": float(cpu_rate) if cpu_rate.is_finite() else None,
+        "estimated_memory_usd_per_second": float(memory_rate) if memory_rate.is_finite() else None,
+        "estimated_total_usd_per_second": float(total_rate) if total_rate.is_finite() else None,
+        "estimated_idle_cost_usd": estimated_idle_usd,
         "pricing_reference": "https://modal.com/pricing",
         "pricing_as_of": "2026-11-16",
         "estimate_only": True,
